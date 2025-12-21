@@ -1,5 +1,7 @@
 # Predator - YouTube Downloader
-
+<p align="center">
+<img src="asset/Predatorv1.png">
+</p>
 A modern, cross-platform desktop application for downloading videos and audio from YouTube .
 It is built using Go and the Fyne GUI framework, with yt-dlp as the download engine.
 
