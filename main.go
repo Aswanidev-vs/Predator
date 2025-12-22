@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,68 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"github.com/lrstanley/go-ytdlp"
 )
+
+func checkAndInstallDeps(w fyne.Window) error {
+
+	// Quick check: do we have system ffmpeg and ffprobe in PATH?
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		if _, err := exec.LookPath("ffprobe"); err == nil {
+			// System ffmpeg/ffprobe found → ensure yt-dlp is cached (fast if already there)
+			ytdlp.MustInstall(context.Background(), nil)
+			return nil
+		}
+	}
+	// First time without system ffmpeg → ask user
+	done := make(chan error, 1)
+
+	confirm := dialog.NewConfirm(
+		"Install Required Tools",
+		"Predator requires ffmpeg and ffprobe for merging video+audio and extracting audio.\n\n"+
+			"They are not detected on your system.\n\n"+
+			"We can automatically download open-source bundled versions (yt-dlp + ffmpeg + ffprobe) and cache them locally.\n\n"+
+			"Do you want to continue? (Recommended)",
+		func(ok bool) {
+			if !ok {
+				done <- fmt.Errorf("user declined bundled dependency installation")
+				return
+			}
+
+			// Show progress
+			bar := widget.NewProgressBarInfinite()
+			label := widget.NewLabel("Downloading yt-dlp, ffmpeg & ffprobe…\nThis may take a moment on first run.")
+			content := container.NewVBox(label, bar)
+
+			progressDialog := dialog.NewCustomWithoutButtons("Installing Dependencies", content, w)
+			progressDialog.Show()
+			go func() {
+				defer progressDialog.Hide()
+
+				defer func() {
+					if r := recover(); r != nil {
+						done <- fmt.Errorf("installation panicked: %v", r)
+					}
+				}()
+
+				// Fixed: handle two return values
+				_, err := ytdlp.Install(context.Background(), nil)
+				if err != nil {
+					done <- fmt.Errorf("failed to install dependencies: %w", err)
+					return
+				}
+
+				done <- nil
+			}()
+
+		},
+		w,
+	)
+
+	confirm.SetDismissText("No")
+	confirm.SetConfirmText("Yes, Install")
+	confirm.Show()
+
+	return <-done
+}
 
 const prefOutputDir = "output_dir"
 
@@ -54,8 +117,7 @@ func formatSpeed(speed float64) string {
 
 func main() {
 
-	ytdlp.MustInstall(context.Background(), nil)
-
+	// ytdlp.MustInstall(context.Background(), nil)
 	a := app.NewWithID("Predator")
 	w := a.NewWindow("Predator")
 	w.Resize(fyne.NewSize(520, 480))
@@ -68,7 +130,20 @@ func main() {
 		w.SetIcon(appIcon)
 	}
 	/* -------------------- UI -------------------- */
-
+	go func() {
+		err := checkAndInstallDeps(w)
+		if err != nil {
+			fyne.Do(func() {
+				var msg string
+				if strings.Contains(err.Error(), "user declined") {
+					msg = "Dependency installation was declined.\n\nVideo downloads and audio extraction will not work properly."
+				} else {
+					msg = fmt.Sprintf("Failed to install required dependencies (yt-dlp/ffmpeg):\n%s\n\nSome features will be limited.", err)
+				}
+				dialog.ShowError(fmt.Errorf(msg), w)
+			})
+		}
+	}()
 	urlEntry := widget.NewEntry()
 	urlEntry.SetPlaceHolder("Paste YouTube URL here")
 
