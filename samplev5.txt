@@ -46,10 +46,6 @@ func formatETA(d time.Duration) string {
 	return fmt.Sprintf("%02d:%02d", m, sec)
 }
 
-func formatSpeed(speed float64) string {
-	return formatBytes(speed) + "/s"
-}
-
 /* -------------------- Main -------------------- */
 
 func main() {
@@ -104,8 +100,6 @@ func main() {
 	cancelBtn := widget.NewButton("Cancel", nil)
 	cancelBtn.Disable()
 
-	titleLabel := widget.NewLabel("")
-	titleLabel.Wrapping = fyne.TextWrapWord
 	/* -------------------- Output Dir -------------------- */
 
 	outputDir := prefs.String(prefOutputDir)
@@ -164,7 +158,7 @@ func main() {
 				downloadBtn.Disable()
 			})
 
-			go fetchVideoInfo(text, resolutions, resSelect, statusLabel, titleLabel, downloadBtn, &fetching)
+			go fetchVideoInfo(text, resolutions, resSelect, statusLabel, downloadBtn, &fetching)
 		})
 	}
 
@@ -195,63 +189,18 @@ func main() {
 		go func() {
 			defer atomic.StoreInt32(&downloading, 0)
 
-			var lastDownloaded int
-			var lastTime time.Time = time.Now()
-			var smoothedSpeed float64
-
 			updateProgress := func(p ytdlp.ProgressUpdate) {
 				if p.Status != "downloading" {
 					return
 				}
 
-				now := time.Now()
-				elapsed := now.Sub(lastTime).Seconds()
-				var speed float64
-				if elapsed > 0 {
-					speed = float64(p.DownloadedBytes-lastDownloaded) / elapsed
-				}
-
-				// Apply exponential moving average for smoother speed display
-				const alpha = 0.2 // Smoothing factor: 20% weight to new speed
-				if smoothedSpeed == 0 {
-					smoothedSpeed = speed
-				} else {
-					smoothedSpeed = alpha*speed + (1-alpha)*smoothedSpeed
-				}
 				fyne.Do(func() {
 					progressBar.SetValue(p.Percent() / 100)
-
-					var downloadFinished bool
-
-					// ---- Detect download completion ----
-					if p.Percent() >= 100 && p.Status != "downloading" {
-						downloadFinished = true
-					}
-
-					// ---- Processing / ffmpeg phase ----
-					if downloadFinished {
-						statusLabel.SetText("Processing…")
-						speedLabel.SetText("")
-						return
-					}
-
-					// ---- Normal downloading ----
-					statusLabel.SetText(fmt.Sprintf("Downloading… %.1f%%", p.Percent()))
-
-					displaySpeed := smoothedSpeed
-					if displaySpeed < 0 {
-						displaySpeed = 0
-					}
-
-					speedLabel.SetText(fmt.Sprintf(
-						"Speed: %s | ETA: %s",
-						formatSpeed(displaySpeed),
-						formatETA(p.ETA()),
-					))
+					statusLabel.SetText(fmt.Sprintf("Downloading... %.1f%%", p.Percent()))
+					speedLabel.SetText(
+						"ETA: " + formatETA(p.ETA()),
+					)
 				})
-
-				lastDownloaded = p.DownloadedBytes
-				lastTime = now
 			}
 
 			var err error
@@ -312,7 +261,6 @@ func main() {
 	content := container.NewVBox(
 		widget.NewLabel("YouTube URL"),
 		urlEntry,
-		titleLabel,
 		downloadType,
 		resSelect,
 		audioSelect,
@@ -335,7 +283,6 @@ func fetchVideoInfo(
 	resolutions []string,
 	resSelect *widget.Select,
 	statusLabel *widget.Label,
-	titleLabel *widget.Label,
 	downloadBtn *widget.Button,
 	fetching *int32,
 ) {
@@ -366,7 +313,7 @@ func fetchVideoInfo(
 			statusLabel.SetText("Failed to parse info")
 			return
 		}
-		titleLabel.SetText("Title : " + info.Title)
+
 		resMap := make(map[string]string)
 		for _, f := range info.Formats {
 			if f.Vcodec != "none" && f.Height != nil {

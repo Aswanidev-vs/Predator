@@ -104,8 +104,6 @@ func main() {
 	cancelBtn := widget.NewButton("Cancel", nil)
 	cancelBtn.Disable()
 
-	titleLabel := widget.NewLabel("")
-	titleLabel.Wrapping = fyne.TextWrapWord
 	/* -------------------- Output Dir -------------------- */
 
 	outputDir := prefs.String(prefOutputDir)
@@ -164,7 +162,7 @@ func main() {
 				downloadBtn.Disable()
 			})
 
-			go fetchVideoInfo(text, resolutions, resSelect, statusLabel, titleLabel, downloadBtn, &fetching)
+			go fetchVideoInfo(text, resolutions, resSelect, statusLabel, downloadBtn, &fetching)
 		})
 	}
 
@@ -312,7 +310,6 @@ func main() {
 	content := container.NewVBox(
 		widget.NewLabel("YouTube URL"),
 		urlEntry,
-		titleLabel,
 		downloadType,
 		resSelect,
 		audioSelect,
@@ -335,7 +332,6 @@ func fetchVideoInfo(
 	resolutions []string,
 	resSelect *widget.Select,
 	statusLabel *widget.Label,
-	titleLabel *widget.Label,
 	downloadBtn *widget.Button,
 	fetching *int32,
 ) {
@@ -366,7 +362,7 @@ func fetchVideoInfo(
 			statusLabel.SetText("Failed to parse info")
 			return
 		}
-		titleLabel.SetText("Title : " + info.Title)
+
 		resMap := make(map[string]string)
 		for _, f := range info.Formats {
 			if f.Vcodec != "none" && f.Height != nil {
