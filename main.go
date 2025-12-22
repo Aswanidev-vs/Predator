@@ -260,9 +260,15 @@ func main() {
 				selected := strings.Split(resSelect.Selected, " ")[0]
 				res := strings.TrimSuffix(selected, "p")
 
-				format := "bestvideo+bestaudio/best"
+				var format string
 				if selected != "best" {
-					format = "bestvideo[height<=" + res + "]+bestaudio/best"
+					format = fmt.Sprintf(
+						"bestvideo[ext=mp4][height<=%s]+bestaudio[ext=m4a]/mp4/"+
+							"bestvideo[height<=%s]+bestaudio/best",
+						res, res,
+					)
+				} else {
+					format = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4/bestvideo+bestaudio/best"
 				}
 
 				_, err = ytdlp.New().
@@ -271,6 +277,7 @@ func main() {
 					Output(outputDir+"/%(title)s.%(ext)s").
 					ProgressFunc(200*time.Millisecond, updateProgress).
 					Run(ctx, url)
+
 			} else {
 				_, err = ytdlp.New().
 					ExtractAudio().
