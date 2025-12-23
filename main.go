@@ -337,20 +337,36 @@ func main() {
 				res := strings.TrimSuffix(selected, "p")
 
 				var format string
+				// if selected != "best" {
+				// 	// For specific resolutions, prioritize height over codec to get the selected resolution
+				// 	format = fmt.Sprintf(
+				// 		"bestvideo[height<=%s]+bestaudio/bestvideo[ext=mp4][height<=%s]+bestaudio[ext=m4a]/mp4/best",
+				// 		res, res,
+				// 	)
+				// } else {
+				// 	// For best quality, prioritize reliable codecs for merging
+				// 	format = "bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec^=vp9]+bestaudio/bestvideo[vcodec^=av01]+bestaudio/bestvideo+bestaudio/best"
+				// }
 				if selected != "best" {
-					// For specific resolutions, prioritize height over codec to get the selected resolution
 					format = fmt.Sprintf(
-						"bestvideo[height<=%s]+bestaudio/bestvideo[ext=mp4][height<=%s]+bestaudio[ext=m4a]/mp4/best",
-						res, res,
+						"bestvideo[height<=%s][ext=mp4]+bestaudio[ext=m4a]/"+
+							"bestvideo[height<=%s]+bestaudio/best[height<=%s]",
+						res, res, res,
 					)
 				} else {
-					// For best quality, prioritize reliable codecs for merging
-					format = "bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec^=vp9]+bestaudio/bestvideo[vcodec^=av01]+bestaudio/bestvideo+bestaudio/best"
-				}
+					// format = "bestvideo[vcodec^=av01|vcodec^=vp9|vcodec^=avc1]+bestaudio/bestvideo+bestaudio/best"
+					format =
+						"bestvideo[vcodec^=av01]+bestaudio/" +
+							"bestvideo[vcodec^=vp9]+bestaudio/" +
+							"bestvideo[vcodec^=avc1]+bestaudio/" +
+							"bestvideo+bestaudio/best"
 
+				}
 				_, err = ytdlp.New().
 					Format(format).
-					MergeOutputFormat("mp4").
+					// MergeOutputFormat("mp4").
+					NoKeepVideo().
+					NoKeepFragments().
 					// Output(outputDir+"/%(title)s.%(ext)s").
 					// Output(filepath.Join(outputDir, "%(title)s [%(id)s].%(ext)s")).
 					Output(filepath.Join(outputDir, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
