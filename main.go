@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -337,19 +338,22 @@ func main() {
 
 				var format string
 				if selected != "best" {
+					// For specific resolutions, prioritize height over codec to get the selected resolution
 					format = fmt.Sprintf(
-						"bestvideo[ext=mp4][height<=%s]+bestaudio[ext=m4a]/mp4/"+
-							"bestvideo[height<=%s]+bestaudio/best",
+						"bestvideo[height<=%s]+bestaudio/bestvideo[ext=mp4][height<=%s]+bestaudio[ext=m4a]/mp4/best",
 						res, res,
 					)
 				} else {
-					format = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4/bestvideo+bestaudio/best"
+					// For best quality, prioritize reliable codecs for merging
+					format = "bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec^=vp9]+bestaudio/bestvideo[vcodec^=av01]+bestaudio/bestvideo+bestaudio/best"
 				}
 
 				_, err = ytdlp.New().
 					Format(format).
 					MergeOutputFormat("mp4").
-					Output(outputDir+"/%(title)s.%(ext)s").
+					// Output(outputDir+"/%(title)s.%(ext)s").
+					// Output(filepath.Join(outputDir, "%(title)s [%(id)s].%(ext)s")).
+					Output(filepath.Join(outputDir, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
 					ProgressFunc(200*time.Millisecond, updateProgress).
 					Run(ctx, url)
 
@@ -357,7 +361,9 @@ func main() {
 				_, err = ytdlp.New().
 					ExtractAudio().
 					AudioFormat(audioSelect.Selected).
-					Output(outputDir+"/%(title)s.%(ext)s").
+					// Output(outputDir+"/%(title)s.%(ext)s").
+					// Output(filepath.Join(outputDir, "%(title)s [%(id)s].%(ext)s")).
+					Output(filepath.Join(outputDir, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
 					ProgressFunc(200*time.Millisecond, updateProgress).
 					Run(ctx, url)
 			}
@@ -425,6 +431,7 @@ func fetchVideoInfo(
 	defer cancel()
 
 	result, err := ytdlp.New().DumpJSON().Run(ctx, url)
+	// result, err := ytdlp.New().DumpJSON().NoCacheDir().Run(ctx, url)
 
 	fyne.Do(func() {
 		defer atomic.StoreInt32(fetching, 0)

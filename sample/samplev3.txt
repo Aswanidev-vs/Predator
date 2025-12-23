@@ -1,0 +1,261 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"math"
+	"strings"
+	"sync/atomic"
+	"time"
+	"unsafe"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/widget"
+
+	"github.com/lrstanley/go-ytdlp"
+)
+
+const prefOutputDir = "output_dir"
+
+func main() {
+	ytdlp.MustInstall(context.Background(), nil)
+
+	a := app.NewWithID("gophergrab")
+	w := a.NewWindow("GopherGrab")
+	w.Resize(fyne.NewSize(420, 380))
+
+	prefs := a.Preferences()
+
+	// --------------------
+	// UI
+	// --------------------
+
+	urlEntry := widget.NewEntry()
+	urlEntry.SetPlaceHolder("Paste YouTube URL here")
+
+	resolutions := []string{"144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p"}
+	resSelect := widget.NewSelect(resolutions, nil)
+	resSelect.SetSelected("720p")
+
+	audioSelect := widget.NewSelect([]string{"MP3", "WAV"}, nil)
+	audioSelect.SetSelected("MP3")
+	audioSelect.Disable()
+
+	downloadType := widget.NewRadioGroup([]string{"Video", "Audio"}, func(s string) {
+		if s == "Video" {
+			resSelect.Enable()
+			audioSelect.Disable()
+		} else {
+			resSelect.Disable()
+			audioSelect.Enable()
+		}
+	})
+	downloadType.SetSelected("Video")
+
+	progressBar := widget.NewProgressBar()
+	statusLabel := widget.NewLabel("Idle")
+
+	downloadBtn := widget.NewButton("Download", nil)
+	cancelBtn := widget.NewButton("Cancel", nil)
+	cancelBtn.Disable()
+
+	// --------------------
+	// Output directory
+	// --------------------
+
+	outputDir := prefs.String(prefOutputDir)
+	outputDirLabel := widget.NewLabel("")
+
+	updateOutputUI := func() {
+		if outputDir == "" {
+			outputDirLabel.SetText("Download location not set")
+			downloadBtn.Disable()
+		} else {
+			outputDirLabel.SetText("Download Location: " + outputDir)
+			downloadBtn.Enable()
+		}
+	}
+
+	selectDirectory := func() {
+		dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
+			if err != nil || uri == nil {
+				return
+			}
+			outputDir = uri.Path()
+			prefs.SetString(prefOutputDir, outputDir)
+			updateOutputUI()
+		}, w).Show()
+	}
+
+	if outputDir == "" {
+		dialog.ShowInformation(
+			"Select Download Location",
+			"You must choose a download folder before downloading.",
+			w,
+		)
+		selectDirectory()
+	}
+
+	updateOutputUI()
+	changeDirBtn := widget.NewButton("Change Download Location", selectDirectory)
+
+	// --------------------
+	// Download + Cancel Logic
+	// --------------------
+
+	var cancelFunc context.CancelFunc
+	var downloading int32
+
+	downloadBtn.OnTapped = func() {
+		if atomic.LoadInt32(&downloading) == 1 {
+			return
+		}
+
+		url := strings.TrimSpace(urlEntry.Text)
+		if url == "" {
+			statusLabel.SetText("Please enter a URL")
+			return
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelFunc = cancel
+
+		atomic.StoreInt32(&downloading, 1)
+
+		downloadBtn.Disable()
+		cancelBtn.Enable()
+		progressBar.SetValue(0)
+		statusLabel.SetText("Starting...")
+
+		go func() {
+			defer atomic.StoreInt32(&downloading, 0)
+
+			var (
+				lastUpdateTime int64
+				lastValue      float64
+			)
+
+			atomic.StoreInt64(&lastUpdateTime, time.Now().UnixNano())
+
+			updateProgress := func(p ytdlp.ProgressUpdate) {
+				val := p.Percent() / 100.0
+				if val <= 0 {
+					return
+				}
+
+				atomic.StoreInt64(&lastUpdateTime, time.Now().UnixNano())
+				atomic.StoreUint64((*uint64)(unsafe.Pointer(&lastValue)), math.Float64bits(val))
+
+				fyne.Do(func() {
+					progressBar.SetValue(val)
+					statusLabel.SetText(fmt.Sprintf("Downloading... %.1f%%", val*100))
+				})
+			}
+
+			// Synthetic progress
+			ticker := time.NewTicker(150 * time.Millisecond)
+			defer ticker.Stop()
+
+			go func() {
+				for range ticker.C {
+					if atomic.LoadInt32(&downloading) == 0 {
+						return
+					}
+					last := time.Unix(0, atomic.LoadInt64(&lastUpdateTime))
+					if time.Since(last) > 600*time.Millisecond {
+						fyne.Do(func() {
+							if progressBar.Value < 0.95 {
+								progressBar.SetValue(progressBar.Value + 0.002)
+								statusLabel.SetText("Processing...")
+							}
+						})
+					}
+				}
+			}()
+
+			var err error
+
+			if downloadType.Selected == "Video" {
+				res := strings.TrimSuffix(resSelect.Selected, "p")
+				_, err = ytdlp.New().
+					NoContinue().
+					Downloader("http").
+					NoPart().
+					Format(fmt.Sprintf("bestvideo[height<=%s][ext=mp4]+bestaudio/best", res)).
+					MergeOutputFormat("mp4").
+					Output(outputDir+"/%(title)s.%(ext)s").
+					ProgressTemplate("download:%(progress._percent_str)s").
+					ProgressFunc(200*time.Millisecond, updateProgress).
+					Run(ctx, url)
+			} else {
+				_, err = ytdlp.New().
+					NoContinue().
+					Downloader("http").
+					NoPart().
+					ExtractAudio().
+					AudioFormat(strings.ToLower(audioSelect.Selected)).
+					Output(outputDir+"/%(title)s.%(ext)s").
+					ProgressTemplate("download:%(progress._percent_str)s").
+					ProgressFunc(200*time.Millisecond, updateProgress).
+					Run(ctx, url)
+			}
+
+			fyne.Do(func() {
+				cancelBtn.Disable()
+				downloadBtn.Enable()
+
+				if err != nil {
+					if ctx.Err() == context.Canceled {
+						statusLabel.SetText("Download canceled")
+						progressBar.SetValue(0)
+					} else {
+						log.Println(err)
+						statusLabel.SetText("Error: " + err.Error())
+						progressBar.SetValue(0)
+					}
+				} else {
+					progressBar.SetValue(1)
+					statusLabel.SetText("Download completed!")
+				}
+			})
+		}()
+	}
+
+	cancelBtn.OnTapped = func() {
+		if cancelFunc != nil {
+			cancelFunc()
+		}
+	}
+
+	// --------------------
+	// Layout
+	// --------------------
+
+	content := container.NewVBox(
+		widget.NewLabel("YouTube URL"),
+		urlEntry,
+
+		widget.NewLabel("Download Type"),
+		downloadType,
+
+		widget.NewLabel("Video Resolution"),
+		resSelect,
+
+		widget.NewLabel("Audio Format"),
+		audioSelect,
+
+		outputDirLabel,
+		changeDirBtn,
+
+		container.NewHBox(downloadBtn, cancelBtn),
+		statusLabel,
+		progressBar,
+	)
+
+	w.SetContent(content)
+	w.ShowAndRun()
+}
