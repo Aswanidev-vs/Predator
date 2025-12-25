@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -21,61 +20,57 @@ import (
 	"github.com/lrstanley/go-ytdlp"
 )
 
-func checkAndInstallDeps(w fyne.Window, onComplete func(err error)) {
-	// 1. Check if system ffmpeg already exists to skip download
-	_, errFF := exec.LookPath("ffmpeg")
-	_, errFP := exec.LookPath("ffprobe")
+func checkAndInstallDeps(w fyne.Window) error {
 
-	if errFF == nil && errFP == nil {
-		go func() {
-			// Fast path: ensure yt-dlp is ready
-			// Note: Using context.Background() as per your snippet
-			// Use ytdlp.Install (which returns a value) instead of MustInstall (which returns nothing)
-			_, err := ytdlp.Install(context.Background(), nil)
-
-			if err != nil {
-				dialog.ShowError(fmt.Errorf("Failed to install yt-dlp automatically: %v", err), w)
-				onComplete(err)
-				return
-			}
-			onComplete(nil)
-		}()
-		return
+	// Quick check: do we have system ffmpeg and ffprobe in PATH?
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		if _, err := exec.LookPath("ffprobe"); err == nil {
+			// System ffmpeg/ffprobe found → ensure yt-dlp is cached (fast if already there)
+			ytdlp.MustInstall(context.Background(), nil)
+			return nil
+		}
 	}
+	// First time without system ffmpeg → ask user
+	done := make(chan error, 1)
 
-	// 2. Ask user for permission to install bundled versions
 	confirm := dialog.NewConfirm(
 		"Install Required Tools",
-		"Predator requires ffmpeg and ffprobe.\n\nWe can automatically download bundled versions for you. Continue?",
+		"Predator requires ffmpeg and ffprobe for merging video+audio and extracting audio.\n\n"+
+			"They are not detected on your system.\n\n"+
+			"We can automatically download open-source bundled versions (yt-dlp + ffmpeg + ffprobe) and cache them locally.\n\n"+
+			"Do you want to continue? (Recommended)",
 		func(ok bool) {
 			if !ok {
-				onComplete(fmt.Errorf("user declined installation"))
+				done <- fmt.Errorf("user declined bundled dependency installation")
 				return
 			}
 
-			// 3. Show Progress UI
+			// Show progress
 			bar := widget.NewProgressBarInfinite()
-			label := widget.NewLabel("Downloading dependencies...\nThis may take a moment.")
-			progressDialog := dialog.NewCustomWithoutButtons("Installing", container.NewVBox(label, bar), w)
-			progressDialog.Show()
+			label := widget.NewLabel("Downloading yt-dlp, ffmpeg & ffprobe…\nThis may take a moment on first run.")
+			content := container.NewVBox(label, bar)
 
-			// 4. Run the installation with your error handling
+			progressDialog := dialog.NewCustomWithoutButtons("Installing Dependencies", content, w)
+			progressDialog.Show()
 			go func() {
 				defer progressDialog.Hide()
 
-				// --- YOUR INCLUDED BLOCK START ---
-				// Use ytdlp.Install (which returns a value) instead of MustInstall (which returns nothing)
-				_, err := ytdlp.Install(context.Background(), nil)
+				defer func() {
+					if r := recover(); r != nil {
+						done <- fmt.Errorf("installation panicked: %v", r)
+					}
+				}()
 
+				// Fixed: handle two return values
+				_, err := ytdlp.Install(context.Background(), nil)
 				if err != nil {
-					dialog.ShowError(fmt.Errorf("Failed to install yt-dlp automatically: %v", err), w)
-					onComplete(err)
+					done <- fmt.Errorf("failed to install dependencies: %w", err)
 					return
 				}
-				// --- YOUR INCLUDED BLOCK END ---
 
-				onComplete(nil)
+				done <- nil
 			}()
+
 		},
 		w,
 	)
@@ -83,6 +78,8 @@ func checkAndInstallDeps(w fyne.Window, onComplete func(err error)) {
 	confirm.SetDismissText("No")
 	confirm.SetConfirmText("Yes, Install")
 	confirm.Show()
+
+	return <-done
 }
 
 const prefOutputDir = "output_dir"
@@ -135,24 +132,7 @@ func main() {
 	}
 	/* -------------------- UI -------------------- */
 	go func() {
-		/* -------------------- UI -------------------- */
-		// This is the correct way to call the async function
-		checkAndInstallDeps(w, func(err error) {
-			if err != nil {
-				// Use fyne.Do to ensure the dialog shows on the UI thread
-				fyne.Do(func() {
-					var msg string
-					if strings.Contains(err.Error(), "user declined") {
-						msg = "Dependency installation was declined.\n\nVideo downloads and audio extraction will not work properly."
-					} else {
-						msg = fmt.Sprintf("Failed to install required dependencies:\n%v\n\nSome features will be limited.", err)
-					}
-					dialog.ShowError(errors.New(msg), w)
-				})
-			} else {
-				fmt.Println("Dependencies loaded successfully")
-			}
-		})
+		err := checkAndInstallDeps(w)
 		if err != nil {
 			fyne.Do(func() {
 				var msg string
@@ -473,6 +453,7 @@ func fetchVideoInfo(
 	defer cancel()
 
 	result, err := ytdlp.New().DumpJSON().Run(ctx, url)
+	// result, err := ytdlp.New().DumpJSON().NoCacheDir().Run(ctx, url)
 
 	fyne.Do(func() {
 		defer atomic.StoreInt32(fetching, 0)

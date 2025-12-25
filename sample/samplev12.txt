@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"image/color"
 	"log"
 	"os"
 	"os/exec"
@@ -15,66 +15,151 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 	"github.com/lrstanley/go-ytdlp"
 )
 
-func checkAndInstallDeps(w fyne.Window, onComplete func(err error)) {
-	// 1. Check if system ffmpeg already exists to skip download
-	_, errFF := exec.LookPath("ffmpeg")
-	_, errFP := exec.LookPath("ffprobe")
+/* -------------------- Custom Progress Bar -------------------- */
 
-	if errFF == nil && errFP == nil {
-		go func() {
-			// Fast path: ensure yt-dlp is ready
-			// Note: Using context.Background() as per your snippet
-			// Use ytdlp.Install (which returns a value) instead of MustInstall (which returns nothing)
-			_, err := ytdlp.Install(context.Background(), nil)
+type CustomProgressBar struct {
+	widget.BaseWidget
+	value float64 // 0.0 to 1.0
+}
 
-			if err != nil {
-				dialog.ShowError(fmt.Errorf("Failed to install yt-dlp automatically: %v", err), w)
-				onComplete(err)
-				return
-			}
-			onComplete(nil)
-		}()
-		return
+func NewCustomProgressBar() *CustomProgressBar {
+	p := &CustomProgressBar{}
+	p.ExtendBaseWidget(p)
+	return p
+}
+
+func (p *CustomProgressBar) SetValue(v float64) {
+	if v < 0 {
+		v = 0
+	}
+	if v > 1 {
+		v = 1
+	}
+	if p.value != v {
+		p.value = v
+		p.Refresh()
+	}
+}
+
+func (p *CustomProgressBar) CreateRenderer() fyne.WidgetRenderer {
+	background := canvas.NewRectangle(color.NRGBA{R: 40, G: 40, B: 50, A: 255}) // Dark background
+	background.CornerRadius = 10
+
+	fill := canvas.NewRectangle(color.NRGBA{R: 0, G: 140, B: 255, A: 255}) // Solid bright blue fill
+	fill.CornerRadius = 10
+
+	// Optional subtle inner shadow/overlay for depth (comment out if not wanted)
+	overlay := canvas.NewRectangle(color.NRGBA{R: 0, G: 0, B: 0, A: 30})
+	overlay.CornerRadius = 10
+
+	percentageText := canvas.NewText("0%", color.White)
+	percentageText.TextSize = 15
+	percentageText.Alignment = fyne.TextAlignCenter
+
+	// Stack: background -> fill -> overlay -> centered text
+	stack := container.NewStack(background, fill, overlay)
+	content := container.NewStack(stack, container.NewCenter(percentageText))
+
+	return &customProgressRenderer{
+		container:      content,
+		background:     background,
+		fill:           fill,
+		overlay:        overlay,
+		percentageText: percentageText,
+		progress:       p,
+	}
+}
+
+type customProgressRenderer struct {
+	container      *fyne.Container
+	background     *canvas.Rectangle
+	fill           *canvas.Rectangle
+	overlay        *canvas.Rectangle
+	percentageText *canvas.Text
+	progress       *CustomProgressBar
+}
+
+func (r *customProgressRenderer) Layout(size fyne.Size) {
+	r.container.Resize(size)
+
+	// Full background and overlay
+	r.background.Resize(size)
+	r.overlay.Resize(size)
+
+	// Fill based on progress
+	fillWidth := size.Width * float32(r.progress.value)
+	r.fill.Resize(fyne.NewSize(fillWidth, size.Height))
+
+	// Update percentage text
+	r.percentageText.Text = fmt.Sprintf("%.0f%%", r.progress.value*100)
+	r.percentageText.Refresh()
+}
+
+func (r *customProgressRenderer) MinSize() fyne.Size {
+	return fyne.NewSize(300, 40)
+}
+
+func (r *customProgressRenderer) Refresh() {
+	r.Layout(r.container.Size())
+}
+
+func (r *customProgressRenderer) BackgroundColor() color.Color {
+	return color.Transparent
+}
+
+func (r *customProgressRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.container}
+}
+
+func (r *customProgressRenderer) Destroy() {}
+
+/* -------------------- Dependency Check -------------------- */
+
+func checkAndInstallDeps(w fyne.Window) error {
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		if _, err := exec.LookPath("ffprobe"); err == nil {
+			ytdlp.MustInstall(context.Background(), nil)
+			return nil
+		}
 	}
 
-	// 2. Ask user for permission to install bundled versions
+	done := make(chan error, 1)
+
 	confirm := dialog.NewConfirm(
 		"Install Required Tools",
-		"Predator requires ffmpeg and ffprobe.\n\nWe can automatically download bundled versions for you. Continue?",
+		"Predator requires ffmpeg and ffprobe for merging video+audio and extracting audio.\n\n"+
+			"They are not detected on your system.\n\n"+
+			"We can automatically download open-source bundled versions (yt-dlp + ffmpeg + ffprobe) and cache them locally.\n\n"+
+			"Do you want to continue? (Recommended)",
 		func(ok bool) {
 			if !ok {
-				onComplete(fmt.Errorf("user declined installation"))
+				done <- fmt.Errorf("user declined bundled dependency installation")
 				return
 			}
 
-			// 3. Show Progress UI
 			bar := widget.NewProgressBarInfinite()
-			label := widget.NewLabel("Downloading dependencies...\nThis may take a moment.")
-			progressDialog := dialog.NewCustomWithoutButtons("Installing", container.NewVBox(label, bar), w)
+			label := widget.NewLabel("Downloading yt-dlp, ffmpeg & ffprobe…\nThis may take a moment on first run.")
+			content := container.NewVBox(label, bar)
+
+			progressDialog := dialog.NewCustomWithoutButtons("Installing Dependencies", content, w)
 			progressDialog.Show()
 
-			// 4. Run the installation with your error handling
 			go func() {
 				defer progressDialog.Hide()
 
-				// --- YOUR INCLUDED BLOCK START ---
-				// Use ytdlp.Install (which returns a value) instead of MustInstall (which returns nothing)
 				_, err := ytdlp.Install(context.Background(), nil)
-
 				if err != nil {
-					dialog.ShowError(fmt.Errorf("Failed to install yt-dlp automatically: %v", err), w)
-					onComplete(err)
+					done <- fmt.Errorf("failed to install dependencies: %w", err)
 					return
 				}
-				// --- YOUR INCLUDED BLOCK END ---
-
-				onComplete(nil)
+				done <- nil
 			}()
 		},
 		w,
@@ -83,6 +168,8 @@ func checkAndInstallDeps(w fyne.Window, onComplete func(err error)) {
 	confirm.SetDismissText("No")
 	confirm.SetConfirmText("Yes, Install")
 	confirm.Show()
+
+	return <-done
 }
 
 const prefOutputDir = "output_dir"
@@ -120,39 +207,20 @@ func formatSpeed(speed float64) string {
 /* -------------------- Main -------------------- */
 
 func main() {
-
-	// ytdlp.MustInstall(context.Background(), nil)
 	a := app.NewWithID("Predator")
 	w := a.NewWindow("Predator")
-	w.Resize(fyne.NewSize(520, 480))
+	w.Resize(fyne.NewSize(560, 520))
 	prefs := a.Preferences()
-	logo, err := os.ReadFile("logov4.png")
-	if err != nil {
-		log.Println("Error reading icon file ", err)
-	} else {
+
+	// Set app icon if available
+	if logo, err := os.ReadFile("logov4.png"); err == nil {
 		appIcon := fyne.NewStaticResource("logov4.png", logo)
 		w.SetIcon(appIcon)
 	}
-	/* -------------------- UI -------------------- */
+
+	/* -------------------- Dependency Check -------------------- */
 	go func() {
-		/* -------------------- UI -------------------- */
-		// This is the correct way to call the async function
-		checkAndInstallDeps(w, func(err error) {
-			if err != nil {
-				// Use fyne.Do to ensure the dialog shows on the UI thread
-				fyne.Do(func() {
-					var msg string
-					if strings.Contains(err.Error(), "user declined") {
-						msg = "Dependency installation was declined.\n\nVideo downloads and audio extraction will not work properly."
-					} else {
-						msg = fmt.Sprintf("Failed to install required dependencies:\n%v\n\nSome features will be limited.", err)
-					}
-					dialog.ShowError(errors.New(msg), w)
-				})
-			} else {
-				fmt.Println("Dependencies loaded successfully")
-			}
-		})
+		err := checkAndInstallDeps(w)
 		if err != nil {
 			fyne.Do(func() {
 				var msg string
@@ -165,6 +233,8 @@ func main() {
 			})
 		}
 	}()
+
+	/* -------------------- UI Components -------------------- */
 	urlEntry := widget.NewEntry()
 	urlEntry.SetPlaceHolder("Paste YouTube URL here")
 
@@ -190,7 +260,7 @@ func main() {
 		}
 	}
 
-	progressBar := widget.NewProgressBar()
+	progressBar := NewCustomProgressBar()
 	statusLabel := widget.NewLabel("")
 	speedLabel := widget.NewLabel("")
 
@@ -202,8 +272,8 @@ func main() {
 
 	titleLabel := widget.NewLabel("")
 	titleLabel.Wrapping = fyne.TextWrapWord
-	/* -------------------- Output Dir -------------------- */
 
+	/* -------------------- Output Directory -------------------- */
 	outputDir := prefs.String(prefOutputDir)
 	outputDirLabel := widget.NewLabel("")
 
@@ -234,8 +304,7 @@ func main() {
 
 	changeDirBtn := widget.NewButton("Change Download Location", selectDirectory)
 
-	/* -------------------- Dynamic Fetch -------------------- */
-
+	/* -------------------- Fetch Video Info -------------------- */
 	var fetchTimer *time.Timer
 	var fetching int32
 
@@ -264,8 +333,7 @@ func main() {
 		})
 	}
 
-	/* -------------------- Download -------------------- */
-
+	/* -------------------- Download Logic -------------------- */
 	var cancelFunc context.CancelFunc
 	var downloading int32
 
@@ -275,7 +343,7 @@ func main() {
 		}
 
 		url := strings.TrimSpace(urlEntry.Text)
-		if url == "" {
+		if url == "" || outputDir == "" {
 			return
 		}
 
@@ -285,6 +353,7 @@ func main() {
 
 		progressBar.SetValue(0)
 		statusLabel.SetText("Starting download...")
+		speedLabel.SetText("")
 		cancelBtn.Enable()
 		downloadBtn.Disable()
 
@@ -307,42 +376,27 @@ func main() {
 					speed = float64(p.DownloadedBytes-lastDownloaded) / elapsed
 				}
 
-				// Apply exponential moving average for smoother speed display
-				const alpha = 0.2 // Smoothing factor: 20% weight to new speed
+				const alpha = 0.2
 				if smoothedSpeed == 0 {
 					smoothedSpeed = speed
 				} else {
 					smoothedSpeed = alpha*speed + (1-alpha)*smoothedSpeed
 				}
+
 				fyne.Do(func() {
 					progressBar.SetValue(p.Percent() / 100)
 
-					// var downloadFinished bool
-
-					// // ---- Detect download completion ----
-					// if p.Percent() >= 100 && p.Status != "downloading" {
-					// 	downloadFinished = true
-					// }
-
-					// // ---- Processing / ffmpeg phase ----
-					// if downloadFinished {
-					// 	statusLabel.SetText("Processing…")
-					// 	speedLabel.SetText("")
-					// 	return
-					// }
 					if p.Percent() >= 100 {
 						statusLabel.SetText("Processing… (merging)")
 						speedLabel.SetText("")
 						return
 					}
-					// ---- Normal downloading ----
-					statusLabel.SetText(fmt.Sprintf("Downloading… %.1f%%", p.Percent()))
 
+					statusLabel.SetText(fmt.Sprintf("Downloading… %.1f%%", p.Percent()))
 					displaySpeed := smoothedSpeed
 					if displaySpeed < 0 {
 						displaySpeed = 0
 					}
-
 					speedLabel.SetText(fmt.Sprintf(
 						"Speed: %s | ETA: %s",
 						formatSpeed(displaySpeed),
@@ -355,44 +409,26 @@ func main() {
 			}
 
 			var err error
-
 			var format string
 
 			if downloadType.Selected == "Video" {
 				selected := strings.Split(resSelect.Selected, " ")[0]
 				res := strings.TrimSuffix(selected, "p")
 
-				// if selected != "best" {
-				// 	// For specific resolutions, prioritize height over codec to get the selected resolution
-				// 	format = fmt.Sprintf(
-				// 		"bestvideo[height<=%s]+bestaudio/bestvideo[ext=mp4][height<=%s]+bestaudio[ext=m4a]/mp4/best",
-				// 		res, res,
-				// 	)
-				// } else {
-				// 	// For best quality, prioritize reliable codecs for merging
-				// 	format = "bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec^=vp9]+bestaudio/bestvideo[vcodec^=av01]+bestaudio/bestvideo+bestaudio/best"
-				// }
 				if selected != "best" {
-					// format = fmt.Sprintf(
-					// 	"bestvideo[height<=%s][ext=mp4]+bestaudio[ext=m4a]/"+
-					// 		"bestvideo[height<=%s]+bestaudio/best[height<=%s]",
-					// 	res, res, res,
-					// )
 					format = fmt.Sprintf(
-						"bestvideo[height<=%s]+bestaudio/bestvideo[ext=mp4][height<=%s]+bestaudio[ext=m4a]/mp4/best",
-						res, res,
+						"bestvideo[height<=%s][ext=mp4]+bestaudio[ext=m4a]/"+
+							"bestvideo[height<=%s]+bestaudio/best[height<=%s]",
+						res, res, res,
 					)
 				} else {
-					// format = "bestvideo[vcodec^=av01|vcodec^=vp9|vcodec^=avc1]+bestaudio/bestvideo+bestaudio/best"
 					format = "bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec^=vp9]+bestaudio/bestvideo[vcodec^=av01]+bestaudio/bestvideo+bestaudio/best"
 				}
+
 				_, err = ytdlp.New().
 					Format(format).
-					MergeOutputFormat("mp4").
 					NoKeepVideo().
 					NoKeepFragments().
-					// Output(outputDir+"/%(title)s.%(ext)s").
-					// Output(filepath.Join(outputDir, "%(title)s [%(id)s].%(ext)s")).
 					Output(filepath.Join(outputDir, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
 					ProgressFunc(200*time.Millisecond, updateProgress).
 					Run(ctx, url)
@@ -401,8 +437,6 @@ func main() {
 				_, err = ytdlp.New().
 					ExtractAudio().
 					AudioFormat(audioSelect.Selected).
-					// Output(outputDir+"/%(title)s.%(ext)s").
-					// Output(filepath.Join(outputDir, "%(title)s [%(id)s].%(ext)s")).
 					Output(filepath.Join(outputDir, "%(title)s [%(id)s].%(ext)s")).
 					ProgressFunc(200*time.Millisecond, updateProgress).
 					Run(ctx, url)
@@ -417,7 +451,7 @@ func main() {
 					if ctx.Err() == context.Canceled {
 						statusLabel.SetText("Download canceled")
 					} else {
-						log.Println(err)
+						log.Println("Download error:", err)
 						statusLabel.SetText("Download failed")
 					}
 					progressBar.SetValue(0)
@@ -436,29 +470,28 @@ func main() {
 	}
 
 	/* -------------------- Layout -------------------- */
-
 	content := container.NewVBox(
 		widget.NewLabel("YouTube URL"),
 		urlEntry,
 		titleLabel,
 		downloadType,
 		container.NewGridWithColumns(2, resSelect, audioSelect),
-		// resSelect,
-		// audioSelect,
 		widget.NewSeparator(),
 		outputDirLabel,
 		changeDirBtn,
+		widget.NewSeparator(),
 		container.NewHBox(downloadBtn, cancelBtn),
 		statusLabel,
 		speedLabel,
 		progressBar,
 	)
 
-	w.SetContent(container.NewScroll(content))
+	w.SetContent(container.NewVScroll(content))
+	w.CenterOnScreen()
 	w.ShowAndRun()
 }
 
-/* -------------------- Fetch Function -------------------- */
+/* -------------------- Fetch Video Info -------------------- */
 
 func fetchVideoInfo(
 	url string,
@@ -478,7 +511,7 @@ func fetchVideoInfo(
 		defer atomic.StoreInt32(fetching, 0)
 
 		if err != nil {
-			statusLabel.SetText("Failed to fetch info")
+			statusLabel.SetText("Failed to fetch info: " + err.Error())
 			return
 		}
 
@@ -496,7 +529,9 @@ func fetchVideoInfo(
 			statusLabel.SetText("Failed to parse info")
 			return
 		}
-		titleLabel.SetText("Title : " + info.Title)
+
+		titleLabel.SetText("Title: " + info.Title)
+
 		resMap := make(map[string]string)
 		for _, f := range info.Formats {
 			if f.Vcodec != "none" && f.Height != nil {
@@ -519,7 +554,9 @@ func fetchVideoInfo(
 		}
 
 		resSelect.Options = opts
-		resSelect.SetSelected(opts[0])
+		if len(opts) > 0 {
+			resSelect.SetSelected(opts[len(opts)-1]) // default to best
+		}
 		resSelect.Enable()
 		downloadBtn.Enable()
 		statusLabel.SetText("Ready to download")
