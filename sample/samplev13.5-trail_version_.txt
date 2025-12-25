@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -17,68 +17,65 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/lrstanley/go-ytdlp"
 )
 
-//go:embed summer.png
-var summerBytes []byte
+func checkAndInstallDeps(w fyne.Window, onComplete func(err error)) {
+	// 1. Check if system ffmpeg already exists to skip download
+	_, errFF := exec.LookPath("ffmpeg")
+	_, errFP := exec.LookPath("ffprobe")
 
-//go:embed dark-mode.png
-var darkBytes []byte
+	if errFF == nil && errFP == nil {
+		go func() {
+			// Fast path: ensure yt-dlp is ready
+			// Note: Using context.Background() as per your snippet
+			// Use ytdlp.Install (which returns a value) instead of MustInstall (which returns nothing)
+			_, err := ytdlp.Install(context.Background(), nil)
 
-func checkAndInstallDeps(w fyne.Window) error {
-
-	// Quick check: do we have system ffmpeg and ffprobe in PATH?
-	if _, err := exec.LookPath("ffmpeg"); err == nil {
-		if _, err := exec.LookPath("ffprobe"); err == nil {
-			// System ffmpeg/ffprobe found → ensure yt-dlp is cached (fast if already there)
-			ytdlp.MustInstall(context.Background(), nil)
-			return nil
-		}
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("Failed to install yt-dlp automatically: %v", err), w)
+				onComplete(err)
+				return
+			}
+			onComplete(nil)
+		}()
+		return
 	}
-	// First time without system ffmpeg → ask user
-	done := make(chan error, 1)
 
+	// 2. Ask user for permission to install bundled versions
 	confirm := dialog.NewConfirm(
 		"Install Required Tools",
-		"Predator requires ffmpeg and ffprobe for merging video+audio and extracting audio.\n\n"+
-			"They are not detected on your system.\n\n"+
-			"We can automatically download open-source bundled versions (yt-dlp + ffmpeg + ffprobe) and cache them locally.\n\n"+
-			"Do you want to continue? (Recommended)",
+		"Predator requires ffmpeg and ffprobe.\n\nWe can automatically download bundled versions for you. Continue?",
 		func(ok bool) {
 			if !ok {
-				done <- fmt.Errorf("user declined bundled dependency installation")
+				onComplete(fmt.Errorf("user declined installation"))
 				return
 			}
 
-			// Show progress
+			// 3. Show Progress UI
 			bar := widget.NewProgressBarInfinite()
-			label := widget.NewLabel("Downloading yt-dlp, ffmpeg & ffprobe…\nThis may take a moment on first run.")
-			content := container.NewVBox(label, bar)
-
-			progressDialog := dialog.NewCustomWithoutButtons("Installing Dependencies", content, w)
+			label := widget.NewLabel("Downloading dependencies...\nThis may take a moment.")
+			progressDialog := dialog.NewCustomWithoutButtons("Installing", container.NewVBox(label, bar), w)
 			progressDialog.Show()
+
+			// 4. Run the installation with your error handling
 			go func() {
 				defer progressDialog.Hide()
 
-				defer func() {
-					if r := recover(); r != nil {
-						done <- fmt.Errorf("installation panicked: %v", r)
-					}
-				}()
-
-				// Fixed: handle two return values
+				// --- YOUR INCLUDED BLOCK START ---
+				// Use ytdlp.Install (which returns a value) instead of MustInstall (which returns nothing)
 				_, err := ytdlp.Install(context.Background(), nil)
+
 				if err != nil {
-					done <- fmt.Errorf("failed to install dependencies: %w", err)
+					dialog.ShowError(fmt.Errorf("Failed to install yt-dlp automatically: %v", err), w)
+					onComplete(err)
 					return
 				}
+				// --- YOUR INCLUDED BLOCK END ---
 
-				done <- nil
+				onComplete(nil)
 			}()
-
 		},
 		w,
 	)
@@ -86,8 +83,6 @@ func checkAndInstallDeps(w fyne.Window) error {
 	confirm.SetDismissText("No")
 	confirm.SetConfirmText("Yes, Install")
 	confirm.Show()
-
-	return <-done
 }
 
 const prefOutputDir = "output_dir"
@@ -138,31 +133,26 @@ func main() {
 		appIcon := fyne.NewStaticResource("logov4.png", logo)
 		w.SetIcon(appIcon)
 	}
-
-	// Load icons
-	lightIcon := fyne.NewStaticResource("summer.png", summerBytes)
-	darkIcon := fyne.NewStaticResource("dark-mode.png", darkBytes)
-
-	isDark := true
-
-	var themeBtn *widget.Button
-	themeBtn = widget.NewButtonWithIcon("", lightIcon, func() {
-		if isDark {
-			a.Settings().SetTheme(theme.LightTheme())
-			themeBtn.SetIcon(darkIcon) // show moon icon
-		} else {
-			a.Settings().SetTheme(theme.DarkTheme())
-			themeBtn.SetIcon(lightIcon) // show sun icon
-		}
-		isDark = !isDark
-	})
-
-	headerLabel := widget.NewLabel("YouTube URL")
-	headerContainer := container.NewBorder(nil, nil, headerLabel, themeBtn)
-
 	/* -------------------- UI -------------------- */
 	go func() {
-		err := checkAndInstallDeps(w)
+		/* -------------------- UI -------------------- */
+		// This is the correct way to call the async function
+		checkAndInstallDeps(w, func(err error) {
+			if err != nil {
+				// Use fyne.Do to ensure the dialog shows on the UI thread
+				fyne.Do(func() {
+					var msg string
+					if strings.Contains(err.Error(), "user declined") {
+						msg = "Dependency installation was declined.\n\nVideo downloads and audio extraction will not work properly."
+					} else {
+						msg = fmt.Sprintf("Failed to install required dependencies:\n%v\n\nSome features will be limited.", err)
+					}
+					dialog.ShowError(errors.New(msg), w)
+				})
+			} else {
+				fmt.Println("Dependencies loaded successfully")
+			}
+		})
 		if err != nil {
 			fyne.Do(func() {
 				var msg string
@@ -175,17 +165,8 @@ func main() {
 			})
 		}
 	}()
-
 	urlEntry := widget.NewEntry()
 	urlEntry.SetPlaceHolder("Paste YouTube URL here")
-
-	// Create clear button with icon
-	clearBtn := widget.NewButtonWithIcon("", theme.ContentClearIcon(), func() {
-		urlEntry.SetText("")
-	})
-
-	// Create a Border container: Entry in Center (expands), Button on Right
-	urlInputContainer := container.NewBorder(nil, nil, nil, clearBtn, urlEntry)
 
 	downloadType := widget.NewRadioGroup([]string{"Video", "Audio"}, nil)
 	downloadType.SetSelected("Video")
@@ -457,10 +438,8 @@ func main() {
 	/* -------------------- Layout -------------------- */
 
 	content := container.NewVBox(
-		// widget.NewLabel("YouTube URL"),
-		headerContainer,
-		// urlEntry,
-		urlInputContainer,
+		widget.NewLabel("YouTube URL"),
+		urlEntry,
 		titleLabel,
 		downloadType,
 		container.NewGridWithColumns(2, resSelect, audioSelect),
@@ -494,7 +473,6 @@ func fetchVideoInfo(
 	defer cancel()
 
 	result, err := ytdlp.New().DumpJSON().Run(ctx, url)
-	// result, err := ytdlp.New().DumpJSON().NoCacheDir().Run(ctx, url)
 
 	fyne.Do(func() {
 		defer atomic.StoreInt32(fetching, 0)

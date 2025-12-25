@@ -1,0 +1,428 @@
+package main
+
+import (
+	"context"
+	_ "embed"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
+	"github.com/lrstanley/go-ytdlp"
+)
+
+//go:embed summer.png
+var summerBytes []byte
+
+//go:embed dark-mode.png
+var darkBytes []byte
+
+const (
+	appName       = "Predator Downloader"
+	prefOutputDir = "output_dir"
+)
+
+func main() {
+	a := app.NewWithID("Predator")
+	w := a.NewWindow(appName)
+	w.Resize(fyne.NewSize(600, 700))
+	prefs := a.Preferences()
+
+	// --- Assets & Icons ---
+	logo, err := os.ReadFile("logov4.png")
+	if err == nil {
+		w.SetIcon(fyne.NewStaticResource("logov4.png", logo))
+	}
+	lightIcon := fyne.NewStaticResource("summer.png", summerBytes)
+	darkIcon := fyne.NewStaticResource("dark-mode.png", darkBytes)
+
+	// --- Dependency Check ---
+	go checkDeps(w)
+
+	// --- UI State Variables ---
+	var isDark = true
+	var currentResolutions = []string{"144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "best"}
+
+	// --- Header Section ---
+	themeBtn := widget.NewButtonWithIcon("", lightIcon, nil)
+	themeBtn.OnTapped = func() {
+		if isDark {
+			a.Settings().SetTheme(theme.LightTheme())
+			themeBtn.SetIcon(darkIcon)
+		} else {
+			a.Settings().SetTheme(theme.DarkTheme())
+			themeBtn.SetIcon(lightIcon)
+		}
+		isDark = !isDark
+	}
+
+	headerLabel := widget.NewLabelWithStyle(appName, fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Monospace: true})
+	header := container.NewBorder(nil, nil, headerLabel, themeBtn)
+
+	// --- Input Section ---
+	urlEntry := widget.NewEntry()
+	urlEntry.SetPlaceHolder("Paste YouTube URL here...")
+	clearBtn := widget.NewButtonWithIcon("", theme.ContentClearIcon(), func() { urlEntry.SetText("") })
+	inputContainer := container.NewBorder(nil, nil, nil, clearBtn, urlEntry)
+
+	videoTitleLabel := widget.NewLabel("Enter a URL to fetch details...")
+	videoTitleLabel.Wrapping = fyne.TextWrapWord
+	videoTitleLabel.TextStyle = fyne.TextStyle{Italic: true}
+	videoTitleLabel.Alignment = fyne.TextAlignCenter
+
+	// --- Settings Section ---
+
+	// Mode Selection (Video vs Audio)
+	downloadMode := widget.NewRadioGroup([]string{"Video", "Audio"}, nil)
+	downloadMode.Horizontal = true
+	downloadMode.SetSelected("Video")
+
+	// Dropdowns
+	resSelect := widget.NewSelect(currentResolutions, nil)
+	resSelect.PlaceHolder = "Resolution"
+	resSelect.SetSelected("best")
+
+	audioSelect := widget.NewSelect([]string{"mp3", "m4a", "opus", "wav"}, nil)
+	audioSelect.PlaceHolder = "Format"
+	audioSelect.SetSelected("mp3")
+	audioSelect.Disable()
+
+	threadsSelect := widget.NewSelect([]string{"1", "2", "4", "8", "16"}, nil)
+	threadsSelect.PlaceHolder = "Threads"
+	threadsSelect.SetSelected("4")
+
+	// Logic to toggle dropdowns based on mode
+	downloadMode.OnChanged = func(s string) {
+		if s == "Video" {
+			resSelect.Enable()
+			// audioSelect.Disable()
+		} else {
+			// resSelect.Disable()
+			audioSelect.Enable()
+		}
+	}
+
+	// Output Directory
+	outputDir := prefs.String(prefOutputDir)
+	if outputDir == "" {
+		outputDir = "Not Set"
+	}
+	dirLabel := widget.NewLabel(outputDir)
+	dirLabel.Truncation = fyne.TextTruncateEllipsis
+
+	changeDirBtn := widget.NewButtonWithIcon("", theme.FolderOpenIcon(), func() {
+		dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
+			if err == nil && uri != nil {
+				outputDir = uri.Path()
+				prefs.SetString(prefOutputDir, outputDir)
+				dirLabel.SetText(outputDir)
+			}
+		}, w).Show()
+	})
+
+	// Grouping Settings into a form-like grid
+	settingsForm := container.NewVBox(
+		widget.NewLabelWithStyle("Configuration", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		container.NewGridWithColumns(2,
+			widget.NewLabel("Download Mode:"), downloadMode,
+			widget.NewLabel("Resolution:"), resSelect,
+			widget.NewLabel("Audio Format:"), audioSelect,
+			widget.NewLabel("Speed Boost (Threads):"), threadsSelect,
+		),
+		widget.NewSeparator(),
+		container.NewBorder(nil, nil, widget.NewLabel("Save To:"), changeDirBtn, dirLabel),
+	)
+
+	// Wrap settings in a Card for better visuals
+	settingsCard := widget.NewCard("", "", container.NewPadded(settingsForm))
+
+	// --- Action Section ---
+	downloadBtn := widget.NewButtonWithIcon("Start Download", theme.DownloadIcon(), nil)
+	downloadBtn.Importance = widget.HighImportance
+	downloadBtn.Disable()
+
+	// --- Queue Section (Tab 2) ---
+	queueContainer := container.NewVBox()
+	queueScroll := container.NewScroll(queueContainer)
+
+	// Tabs System
+	tabs := container.NewAppTabs(
+		container.NewTabItemWithIcon("New Download", theme.ContentAddIcon(), container.NewVBox(
+			container.NewPadded(inputContainer),
+			videoTitleLabel,
+			layout.NewSpacer(),
+			settingsCard,
+			layout.NewSpacer(),
+			container.NewPadded(downloadBtn),
+		)),
+		container.NewTabItemWithIcon("Queue", theme.ListIcon(), queueScroll),
+	)
+
+	// --- Logic: Fetch Info ---
+	var fetchTimer *time.Timer
+	var fetching int32
+
+	urlEntry.OnChanged = func(text string) {
+		text = strings.TrimSpace(text)
+		if fetchTimer != nil {
+			fetchTimer.Stop()
+		}
+		if text == "" {
+			downloadBtn.Disable()
+			videoTitleLabel.SetText("Enter a URL to fetch details...")
+			return
+		}
+
+		fetchTimer = time.AfterFunc(600*time.Millisecond, func() {
+			if atomic.LoadInt32(&fetching) == 1 {
+				return
+			}
+			atomic.StoreInt32(&fetching, 1)
+
+			fyne.Do(func() {
+				videoTitleLabel.SetText("Fetching video info...")
+				downloadBtn.Disable()
+			})
+
+			go fetchInfo(text, currentResolutions, resSelect, videoTitleLabel, downloadBtn, &fetching)
+		})
+	}
+
+	// --- Logic: Start Download ---
+	downloadBtn.OnTapped = func() {
+		if prefs.String(prefOutputDir) == "" {
+			dialog.ShowInformation("Setup Required", "Please select a download folder first.", w)
+			return
+		}
+
+		url := strings.TrimSpace(urlEntry.Text)
+		title := videoTitleLabel.Text
+		if strings.HasPrefix(title, "Title : ") {
+			title = strings.TrimPrefix(title, "Title : ")
+		}
+
+		// Get Settings
+		mode := downloadMode.Selected
+		res := resSelect.Selected
+		aud := audioSelect.Selected
+		threads, _ := strconv.Atoi(threadsSelect.Selected)
+		dir := prefs.String(prefOutputDir)
+
+		// Switch to queue tab
+		tabs.SelectIndex(1)
+
+		// Spawn Task
+		spawnTask(queueContainer, url, title, dir, mode, res, aud, threads)
+
+		// Reset Input
+		urlEntry.SetText("")
+	}
+
+	// Main Layout
+	mainContent := container.NewBorder(
+		container.NewPadded(header),
+		nil, nil, nil,
+		container.NewPadded(tabs),
+	)
+
+	w.SetContent(mainContent)
+	w.ShowAndRun()
+}
+
+// --- Helper Functions ---
+
+func spawnTask(list *fyne.Container, url, title, dir, mode, res, aud string, threads int) {
+	// UI Components for the Card
+	pBar := widget.NewProgressBar()
+	statusLabel := widget.NewLabel("Initializing...")
+	statusLabel.TextStyle = fyne.TextStyle{Italic: true}
+
+	cancelBtn := widget.NewButtonWithIcon("", theme.CancelIcon(), nil)
+
+	// Header of the card (Title + Cancel)
+	cardHeader := container.NewBorder(nil, nil, widget.NewLabelWithStyle(title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), cancelBtn)
+
+	// Details string
+	details := fmt.Sprintf("%s | %s", mode, res)
+	if mode == "Audio" {
+		details = fmt.Sprintf("Audio | %s", aud)
+	}
+	detailsLabel := widget.NewLabelWithStyle(details, fyne.TextAlignLeading, fyne.TextStyle{Monospace: true})
+
+	// Content layout
+	content := container.NewVBox(
+		cardHeader,
+		detailsLabel,
+		pBar,
+		statusLabel,
+	)
+
+	// Create the Card
+	card := widget.NewCard("", "", container.NewPadded(content))
+	list.Add(card)
+
+	// Context & Logic
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cancelBtn.OnTapped = func() {
+		cancel()
+		statusLabel.SetText("Cancelled")
+		cancelBtn.Disable()
+	}
+
+	go func() {
+		defer cancel()
+
+		var lastDownloaded int
+		var lastTime time.Time = time.Now()
+		var smoothedSpeed float64
+
+		progressFunc := func(p ytdlp.ProgressUpdate) {
+			if p.Status != "downloading" {
+				return
+			}
+
+			// Calculate Smoothed Speed
+			now := time.Now()
+			elapsed := now.Sub(lastTime).Seconds()
+			var speed float64
+			if elapsed > 0 {
+				speed = float64(p.DownloadedBytes-lastDownloaded) / elapsed
+			}
+			if smoothedSpeed == 0 {
+				smoothedSpeed = speed
+			} else {
+				smoothedSpeed = 0.2*speed + 0.8*smoothedSpeed
+			}
+			lastDownloaded = p.DownloadedBytes
+			lastTime = now
+
+			fyne.Do(func() {
+				pBar.SetValue(p.Percent() / 100)
+				if p.Percent() >= 100 {
+					statusLabel.SetText("Processing & Merging...")
+				} else {
+					statusLabel.SetText(fmt.Sprintf("%.1f%% at %s (ETA: %s)", p.Percent(), formatSpeed(smoothedSpeed), formatETA(p.ETA())))
+				}
+			})
+		}
+
+		dl := ytdlp.New().ConcurrentFragments(threads).ProgressFunc(300*time.Millisecond, progressFunc)
+		var err error
+
+		if mode == "Video" {
+			resVal := strings.TrimSuffix(strings.Split(res, " ")[0], "p")
+			format := "bestvideo+bestaudio/best"
+			if resVal != "best" {
+				format = fmt.Sprintf("bestvideo[height<=%s]+bestaudio/bestvideo[ext=mp4][height<=%s]+bestaudio[ext=m4a]/mp4/best", resVal, resVal)
+			}
+			// Fixed filename template
+			_, err = dl.Format(format).MergeOutputFormat("mp4").Output(filepath.Join(dir, "%(title)s.%(ext)s")).Run(ctx, url)
+		} else {
+			_, err = dl.ExtractAudio().AudioFormat(aud).Output(filepath.Join(dir, "%(title)s.%(ext)s")).Run(ctx, url)
+		}
+
+		fyne.Do(func() {
+			cancelBtn.Disable()
+			if err != nil {
+				if ctx.Err() == context.Canceled {
+					statusLabel.SetText("Cancelled by user")
+					pBar.SetValue(0)
+				} else {
+					statusLabel.SetText("Error: " + err.Error())
+					pBar.SetValue(0)
+				}
+			} else {
+				pBar.SetValue(1)
+				statusLabel.SetText("Completed Successfully")
+				// card.SetSubTitle("Done")
+			}
+		})
+	}()
+}
+
+func fetchInfo(url string, resolutions []string, resSelect *widget.Select, titleLbl *widget.Label, btn *widget.Button, fetching *int32) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	res, err := ytdlp.New().DumpJSON().Run(ctx, url)
+
+	fyne.Do(func() {
+		defer atomic.StoreInt32(fetching, 0)
+		if err != nil {
+			titleLbl.SetText("Could not fetch video info.")
+			return
+		}
+
+		var info struct {
+			Title   string `json:"title"`
+			Formats []struct {
+				Height   *int   `json:"height"`
+				Filesize *int64 `json:"filesize"`
+			} `json:"formats"`
+		}
+
+		if json.Unmarshal([]byte(res.Stdout), &info) == nil {
+			titleLbl.SetText("Title : " + info.Title)
+
+			// Update resolution sizes if possible
+			// (Simplified logic for brevity, keeps UI responsive)
+			resSelect.Enable()
+			btn.Enable()
+		}
+	})
+}
+
+func checkDeps(w fyne.Window) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		dialog.ShowInformation("Missing Dependencies", "FFmpeg is missing. Some features may not work. Please install FFmpeg.", w)
+	} else {
+		// Only install ytdlp binary if we have ffmpeg
+		ytdlp.MustInstall(context.Background(), nil)
+	}
+}
+
+// Helpers
+func formatBytes(b float64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%.0f B", b)
+	}
+	div, exp := float64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", b/div, "KMGT"[exp])
+}
+
+func formatSpeed(val interface{}) string {
+	// ytdlp library might return float or int depending on version
+	switch v := val.(type) {
+	case float64:
+		return formatBytes(v) + "/s"
+	case int:
+		return formatBytes(float64(v)) + "/s"
+	default:
+		return "..."
+	}
+}
+
+func formatETA(d time.Duration) string {
+	if d.Hours() > 0 {
+		return fmt.Sprintf("%02d:%02d:%02d", int(d.Hours()), int(d.Minutes())%60, int(d.Seconds())%60)
+	}
+	return fmt.Sprintf("%02d:%02d", int(d.Minutes()), int(d.Seconds())%60)
+}
