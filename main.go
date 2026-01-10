@@ -189,6 +189,7 @@ func main() {
 
 	downloadType := widget.NewRadioGroup([]string{"Video", "Audio"}, nil)
 	downloadType.SetSelected("Video")
+	downloadType.Horizontal = true
 
 	resolutions := []string{"144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "best"}
 	resSelect := widget.NewSelect(nil, nil)

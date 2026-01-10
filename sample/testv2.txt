@@ -1,0 +1,650 @@
+package main
+
+import (
+	"context"
+	_ "embed"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
+	"github.com/lrstanley/go-ytdlp"
+)
+
+//go:embed summer.png
+var summerBytes []byte
+
+//go:embed dark-mode.png
+var darkBytes []byte
+
+func checkAndInstallDeps(w fyne.Window) error {
+
+	// Quick check: do we have system ffmpeg and ffprobe in PATH?
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		if _, err := exec.LookPath("ffprobe"); err == nil {
+			// System ffmpeg/ffprobe found → ensure yt-dlp is cached (fast if already there)
+			ytdlp.MustInstall(context.Background(), nil)
+			return nil
+		}
+	}
+	// First time without system ffmpeg → ask user
+	done := make(chan error, 1)
+
+	confirm := dialog.NewConfirm(
+		"Install Required Tools",
+		"Predator requires ffmpeg and ffprobe for merging video+audio and extracting audio.\n\n"+
+			"They are not detected on your system.\n\n"+
+			"We can automatically download open-source bundled versions (yt-dlp + ffmpeg + ffprobe) and cache them locally.\n\n"+
+			"Do you want to continue? (Recommended)",
+		func(ok bool) {
+			if !ok {
+				done <- fmt.Errorf("user declined bundled dependency installation")
+				return
+			}
+
+			// Show progress
+			bar := widget.NewProgressBarInfinite()
+			label := widget.NewLabel("Downloading yt-dlp, ffmpeg & ffprobe…\nThis may take a moment on first run.")
+			content := container.NewVBox(label, bar)
+
+			progressDialog := dialog.NewCustomWithoutButtons("Installing Dependencies", content, w)
+			progressDialog.Show()
+			go func() {
+				defer progressDialog.Hide()
+
+				defer func() {
+					if r := recover(); r != nil {
+						done <- fmt.Errorf("installation panicked: %v", r)
+					}
+				}()
+
+				_, err := ytdlp.Install(context.Background(), nil)
+				if err != nil {
+					done <- fmt.Errorf("failed to install dependencies: %w", err)
+					return
+				}
+
+				done <- nil
+			}()
+
+		},
+		w,
+	)
+
+	confirm.SetDismissText("No")
+	confirm.SetConfirmText("Yes, Install")
+	confirm.Show()
+
+	return <-done
+}
+
+const prefOutputDir = "output_dir"
+
+/* -------------------- Helpers -------------------- */
+
+func formatBytes(b float64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%.0f B", b)
+	}
+	div, exp := float64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", b/div, "KMGT"[exp])
+}
+
+func formatETA(d time.Duration) string {
+	s := int64(d.Seconds())
+	h := s / 3600
+	m := (s % 3600) / 60
+	sec := s % 60
+	if h > 0 {
+		return fmt.Sprintf("%02d:%02d:%02d", h, m, sec)
+	}
+	return fmt.Sprintf("%02d:%02d", m, sec)
+}
+
+func formatSpeed(speed float64) string {
+	return formatBytes(speed) + "/s"
+}
+
+/* -------------------- Queue System -------------------- */
+
+type DownloadTask struct {
+	URL         string
+	Type        string // "Video" or "Audio"
+	Resolution  string
+	AudioFormat string
+}
+
+var (
+	taskQueue     = make(chan DownloadTask, 100) // Buffered queue
+	activeTasks   = make(map[string]*activeDownload)
+	activeMu      sync.Mutex
+	maxConcurrent int32 = 1
+	sem           chan struct{}
+	outputDir     string // Will be set after preferences load
+)
+
+type activeDownload struct {
+	ctx        context.Context
+	cancel     context.CancelFunc
+	progress   *widget.ProgressBar
+	status     *widget.Label
+	speed      *widget.Label
+	titleLabel *widget.Label
+	container  *fyne.Container // To remove the whole block easily
+}
+
+func initSemaphore(n int) {
+	if n < 1 {
+		n = 1
+	}
+	atomic.StoreInt32(&maxConcurrent, int32(n))
+	sem = make(chan struct{}, n)
+	for i := 0; i < n; i++ {
+		sem <- struct{}{} // Pre-fill to allow immediate starts
+	}
+}
+
+func worker(mainWindow fyne.Window, downloadsContainer *fyne.Container) {
+	for task := range taskQueue {
+		<-sem // Wait for an available slot
+
+		// Create UI elements for this download
+		titleLbl := widget.NewLabel("Title: Fetching...")
+		titleLbl.Wrapping = fyne.TextWrapWord
+
+		progBar := widget.NewProgressBar()
+		statLbl := widget.NewLabel("Starting download...")
+		spdLbl := widget.NewLabel("")
+
+		cancelBtn := widget.NewButton("Cancel", nil)
+
+		// Layout for this task
+		taskContainer := container.NewVBox(
+			widget.NewSeparator(),
+			titleLbl,
+			progBar,
+			container.NewHBox(statLbl, widget.NewLabel(""), cancelBtn),
+			spdLbl,
+		)
+
+		// Add to UI
+		fyne.Do(func() {
+			downloadsContainer.Add(taskContainer)
+			downloadsContainer.Refresh()
+		})
+
+		// Context for cancellation
+		ctx, cancel := context.WithCancel(context.Background())
+
+		ad := &activeDownload{
+			ctx:        ctx,
+			cancel:     cancel,
+			progress:   progBar,
+			status:     statLbl,
+			speed:      spdLbl,
+			titleLabel: titleLbl,
+			container:  taskContainer,
+		}
+
+		// Unique key (URL is sufficient for now)
+		taskKey := task.URL
+
+		activeMu.Lock()
+		activeTasks[taskKey] = ad
+		activeMu.Unlock()
+
+		// Cancel button handler
+		cancelBtn.OnTapped = func() {
+			cancel()
+			statLbl.SetText("Cancelling...")
+			cancelBtn.Disable()
+		}
+
+		go func(t DownloadTask, ad *activeDownload) {
+			defer func() {
+				sem <- struct{}{} // Release slot
+
+				// Delay removal for user to see completion/cancel message
+				time.Sleep(3 * time.Second)
+
+				fyne.Do(func() {
+					downloadsContainer.Remove(ad.container)
+					downloadsContainer.Refresh()
+				})
+
+				activeMu.Lock()
+				delete(activeTasks, taskKey)
+				activeMu.Unlock()
+			}()
+
+			// Fetch title
+			infoCtx, infoCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			result, err := ytdlp.New().DumpJSON().Run(infoCtx, t.URL)
+			infoCancel()
+
+			if err == nil {
+				var info struct {
+					Title string `json:"title"`
+				}
+				if json.Unmarshal([]byte(result.Stdout), &info) == nil {
+					fyne.Do(func() {
+						ad.titleLabel.SetText("Title: " + info.Title)
+					})
+				}
+			}
+
+			var lastDownloaded int
+			var lastTime = time.Now()
+			var smoothedSpeed float64
+
+			updateProgress := func(p ytdlp.ProgressUpdate) {
+				if p.Status != "downloading" {
+					return
+				}
+
+				now := time.Now()
+				elapsed := now.Sub(lastTime).Seconds()
+				var speed float64
+				if elapsed > 0 {
+					speed = float64(p.DownloadedBytes-lastDownloaded) / elapsed
+				}
+
+				const alpha = 0.2
+				if smoothedSpeed == 0 {
+					smoothedSpeed = speed
+				} else {
+					smoothedSpeed = alpha*speed + (1-alpha)*smoothedSpeed
+				}
+
+				fyne.Do(func() {
+					ad.progress.SetValue(p.Percent() / 100)
+
+					if p.Percent() >= 100 {
+						ad.status.SetText("Processing… (merging)")
+						ad.speed.SetText("")
+					} else {
+						ad.status.SetText(fmt.Sprintf("Downloading… %.1f%%", p.Percent()))
+						ad.speed.SetText(fmt.Sprintf("Speed: %s | ETA: %s",
+							formatSpeed(smoothedSpeed),
+							formatETA(p.ETA()),
+						))
+					}
+				})
+
+				lastDownloaded = p.DownloadedBytes
+				lastTime = now
+			}
+
+			var dlErr error
+
+			if t.Type == "Video" {
+				res := strings.TrimSuffix(strings.Split(t.Resolution, " ")[0], "p")
+
+				var format string
+				if strings.HasPrefix(t.Resolution, "best") {
+					format = "bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec^=vp9]+bestaudio/bestvideo[vcodec^=av01]+bestaudio/bestvideo+bestaudio/best"
+				} else {
+					format = fmt.Sprintf(
+						"bestvideo[height<=%s]+bestaudio/bestvideo[ext=mp4][height<=%s]+bestaudio[ext=m4a]/mp4/best",
+						res, res,
+					)
+				}
+
+				_, dlErr = ytdlp.New().
+					Format(format).
+					MergeOutputFormat("mp4").
+					NoKeepVideo().
+					NoKeepFragments().
+					Output(filepath.Join(outputDir, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
+					ProgressFunc(200*time.Millisecond, updateProgress).
+					Run(ad.ctx, t.URL)
+
+			} else {
+				_, dlErr = ytdlp.New().
+					ExtractAudio().
+					AudioFormat(t.AudioFormat).
+					Output(filepath.Join(outputDir, "%(title)s [%(id)s].%(ext)s")).
+					ProgressFunc(200*time.Millisecond, updateProgress).
+					Run(ad.ctx, t.URL)
+			}
+
+			fyne.Do(func() {
+				cancelBtn.Disable()
+				if dlErr != nil {
+					if ad.ctx.Err() == context.Canceled {
+						ad.status.SetText("Cancelled")
+					} else {
+						ad.status.SetText("Failed: " + dlErr.Error())
+						log.Println("Download error:", dlErr)
+					}
+					ad.progress.SetValue(0)
+				} else {
+					ad.progress.SetValue(1)
+					ad.status.SetText("Completed ✓")
+				}
+				ad.speed.SetText("")
+			})
+		}(task, ad)
+	}
+}
+
+/* -------------------- Main -------------------- */
+
+func main() {
+
+	a := app.NewWithID("Predator")
+	w := a.NewWindow("Predator")
+	w.Resize(fyne.NewSize(700, 700))
+
+	prefs := a.Preferences()
+
+	// Icon
+	logo, err := os.ReadFile("logov4.png")
+	if err != nil {
+		log.Println("Error reading icon file ", err)
+	} else {
+		appIcon := fyne.NewStaticResource("logov4.png", logo)
+		w.SetIcon(appIcon)
+	}
+
+	// Theme toggle
+	lightIcon := fyne.NewStaticResource("summer.png", summerBytes)
+	darkIcon := fyne.NewStaticResource("dark-mode.png", darkBytes)
+
+	isDark := true
+	var themeBtn *widget.Button
+	themeBtn = widget.NewButtonWithIcon("", lightIcon, func() {
+		if isDark {
+			a.Settings().SetTheme(theme.LightTheme())
+			themeBtn.SetIcon(darkIcon)
+		} else {
+			a.Settings().SetTheme(theme.DarkTheme())
+			themeBtn.SetIcon(lightIcon)
+		}
+		isDark = !isDark
+	})
+
+	headerLabel := widget.NewLabel("YouTube URL")
+	headerContainer := container.NewBorder(nil, nil, headerLabel, themeBtn)
+
+	// Dependency check
+	go func() {
+		err := checkAndInstallDeps(w)
+		if err != nil {
+			fyne.Do(func() {
+				var msg string
+				if strings.Contains(err.Error(), "user declined") {
+					msg = "Dependency installation was declined.\n\nVideo downloads and audio extraction will not work properly."
+				} else {
+					msg = fmt.Sprintf("Failed to install required dependencies (yt-dlp/ffmpeg):\n%s\n\nSome features will be limited.", err)
+				}
+				dialog.ShowError(fmt.Errorf(msg), w)
+			})
+		}
+	}()
+
+	// Input
+	urlEntry := widget.NewEntry()
+	urlEntry.SetPlaceHolder("Paste YouTube URL here")
+
+	clearBtn := widget.NewButtonWithIcon("", theme.ContentClearIcon(), func() {
+		urlEntry.SetText("")
+	})
+	urlInputContainer := container.NewBorder(nil, nil, nil, clearBtn, urlEntry)
+
+	// Options
+	downloadType := widget.NewRadioGroup([]string{"Video", "Audio"}, nil)
+	downloadType.SetSelected("Video")
+
+	resolutions := []string{"144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "best"}
+	resSelect := widget.NewSelect(nil, nil)
+	resSelect.Disable()
+
+	audioFormats := []string{"mp3", "m4a", "opus", "wav"}
+	audioSelect := widget.NewSelect(audioFormats, nil)
+	audioSelect.SetSelected("mp3")
+	audioSelect.Disable()
+
+	downloadType.OnChanged = func(s string) {
+		if s == "Video" {
+			resSelect.Enable()
+			audioSelect.Disable()
+		} else {
+			resSelect.Disable()
+			audioSelect.Enable()
+		}
+	}
+
+	// Concurrent downloads selector
+	queueLabel := widget.NewLabel("Concurrent Downloads:")
+	queueSelect := widget.NewSelect([]string{"1", "2", "4", "8", "16"}, func(choice string) {
+		if choice == "" {
+			return
+		}
+		n, _ := strconv.Atoi(choice)
+		initSemaphore(n)
+	})
+	queueSelect.SetSelected("1")
+	initSemaphore(1) // Initial
+
+	// Output directory
+	outputDir = prefs.String(prefOutputDir)
+	outputDirLabel := widget.NewLabel("")
+
+	updateOutputUI := func() {
+		if outputDir == "" {
+			outputDirLabel.SetText("Download location not set")
+		} else {
+			outputDirLabel.SetText("Download Location: " + outputDir)
+		}
+	}
+
+	selectDirectory := func() {
+		dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
+			if err != nil || uri == nil {
+				return
+			}
+			outputDir = uri.Path()
+			prefs.SetString(prefOutputDir, outputDir)
+			updateOutputUI()
+		}, w).Show()
+	}
+
+	if outputDir == "" {
+		dialog.ShowInformation("Select Download Location", "Please select a download folder.", w)
+		selectDirectory()
+	}
+	updateOutputUI()
+
+	changeDirBtn := widget.NewButton("Change Download Location", selectDirectory)
+
+	// Status & title
+	titleLabel := widget.NewLabel("")
+	titleLabel.Wrapping = fyne.TextWrapWord
+	statusLabel := widget.NewLabel("Ready")
+
+	// Add to queue button
+	addBtn := widget.NewButton("Add to Queue", nil)
+	addBtn.Disable()
+
+	// Dynamic info fetching
+	var fetchTimer *time.Timer
+	var fetching int32
+
+	urlEntry.OnChanged = func(text string) {
+		text = strings.TrimSpace(text)
+		if fetchTimer != nil {
+			fetchTimer.Stop()
+		}
+		if text == "" {
+			titleLabel.SetText("")
+			resSelect.Options = nil
+			resSelect.Disable()
+			addBtn.Disable()
+			statusLabel.SetText("Ready")
+			return
+		}
+
+		fetchTimer = time.AfterFunc(600*time.Millisecond, func() {
+			if atomic.LoadInt32(&fetching) == 1 {
+				return
+			}
+			atomic.StoreInt32(&fetching, 1)
+
+			fyne.Do(func() {
+				statusLabel.SetText("Fetching video info...")
+				addBtn.Disable()
+			})
+
+			go fetchVideoInfo(text, resolutions, resSelect, titleLabel, addBtn, statusLabel, &fetching)
+		})
+	}
+
+	// Add to queue
+	addBtn.OnTapped = func() {
+		url := strings.TrimSpace(urlEntry.Text)
+		if url == "" {
+			return
+		}
+
+		task := DownloadTask{
+			URL:         url,
+			Type:        downloadType.Selected,
+			Resolution:  resSelect.Selected,
+			AudioFormat: audioSelect.Selected,
+		}
+
+		taskQueue <- task
+
+		// Reset input
+		urlEntry.SetText("")
+		titleLabel.SetText("")
+		resSelect.Options = nil
+		resSelect.Disable()
+		addBtn.Disable()
+		statusLabel.SetText(fmt.Sprintf("Added to queue • Concurrent: %d", atomic.LoadInt32(&maxConcurrent)))
+	}
+
+	// Downloads list (scrollable)
+	downloadsScroll := container.NewVScroll(container.NewVBox())
+	downloadsContainer := downloadsScroll.Content.(*fyne.Container)
+
+	// Start worker goroutine
+	go worker(w, downloadsContainer)
+
+	// Layout
+	topSection := container.NewVBox(
+		headerContainer,
+		urlInputContainer,
+		titleLabel,
+		downloadType,
+		container.NewGridWithColumns(2, queueLabel, queueSelect),
+		container.NewGridWithColumns(2, resSelect, audioSelect),
+		outputDirLabel,
+		changeDirBtn,
+		container.NewCenter(addBtn),
+		statusLabel,
+		widget.NewSeparator(),
+	)
+
+	mainContent := container.NewBorder(topSection, nil, nil, nil, downloadsScroll)
+
+	w.SetContent(mainContent)
+	w.ShowAndRun()
+}
+
+/* -------------------- Fetch Function -------------------- */
+
+func fetchVideoInfo(
+	url string,
+	resolutions []string,
+	resSelect *widget.Select,
+	titleLabel *widget.Label,
+	addBtn *widget.Button,
+	statusLabel *widget.Label,
+	fetching *int32,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := ytdlp.New().DumpJSON().Run(ctx, url)
+
+	fyne.Do(func() {
+		defer atomic.StoreInt32(fetching, 0)
+
+		if err != nil {
+			statusLabel.SetText("Failed to fetch info: " + err.Error())
+			addBtn.Disable()
+			return
+		}
+
+		var info struct {
+			Title   string `json:"title"`
+			Formats []struct {
+				Height         *int   `json:"height"`
+				Filesize       *int64 `json:"filesize"`
+				FilesizeApprox *int64 `json:"filesize_approx"`
+				Vcodec         string `json:"vcodec"`
+			} `json:"formats"`
+		}
+
+		if err := json.Unmarshal([]byte(result.Stdout), &info); err != nil {
+			statusLabel.SetText("Failed to parse info")
+			addBtn.Disable()
+			return
+		}
+
+		titleLabel.SetText("Title: " + info.Title)
+
+		resMap := make(map[string]string)
+		for _, f := range info.Formats {
+			if f.Vcodec != "none" && f.Height != nil {
+				res := fmt.Sprintf("%dp", *f.Height)
+				if f.Filesize != nil {
+					resMap[res] = formatBytes(float64(*f.Filesize))
+				} else if f.FilesizeApprox != nil {
+					resMap[res] = "~" + formatBytes(float64(*f.FilesizeApprox))
+				}
+			}
+		}
+
+		// Add "best" option manually
+		resMap["best"] = "Highest available"
+
+		opts := []string{}
+		for _, r := range resolutions {
+			size := "Unknown"
+			if s, ok := resMap[r]; ok {
+				size = s
+			}
+			opts = append(opts, fmt.Sprintf("%s (%s)", r, size))
+		}
+
+		// "best" is already in resolutions list
+		resSelect.Options = opts
+		if len(opts) > 0 {
+			resSelect.SetSelected(opts[len(opts)-1]) // Select "best" by default
+		}
+		resSelect.Enable()
+		addBtn.Enable()
+		statusLabel.SetText("Ready to add to queue")
+	})
+}
