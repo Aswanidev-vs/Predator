@@ -95,6 +95,36 @@ func checkAndInstallDeps(w fyne.Window) error {
 
 const prefOutputDir = "output_dir"
 
+/* -------------------- Helpers -------------------- */
+
+func formatBytes(b float64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%.0f B", b)
+	}
+	div, exp := float64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", b/div, "KMGT"[exp])
+}
+
+func formatETA(d time.Duration) string {
+	s := int64(d.Seconds())
+	h := s / 3600
+	m := (s % 3600) / 60
+	sec := s % 60
+	if h > 0 {
+		return fmt.Sprintf("%02d:%02d:%02d", h, m, sec)
+	}
+	return fmt.Sprintf("%02d:%02d", m, sec)
+}
+
+func formatSpeed(speed float64) string {
+	return formatBytes(speed) + "/s"
+}
+
 /* -------------------- Constants -------------------- */
 
 const (
@@ -126,95 +156,6 @@ func isValidYouTubeURL(url string) bool {
 		}
 	}
 	return false
-}
-
-/* -------------------- Helpers -------------------- */
-
-// updateYtDlp explicitly updates yt-dlp to the latest version
-func updateYtDlp() error {
-	log.Println("Updating yt-dlp to latest version...")
-	// Call Install which should update to latest version
-	// The second parameter can be used to specify options
-	_, err := ytdlp.Install(context.Background(), nil)
-	if err != nil {
-		// Try with MustInstall as fallback
-		log.Println("yt-dlp.Install failed, trying MustInstall:", err)
-		ytdlp.MustInstall(context.Background(), nil)
-		return err
-	}
-	log.Println("yt-dlp updated successfully")
-	return nil
-}
-
-func formatBytes(b float64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%.0f B", b)
-	}
-	div, exp := float64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", b/div, "KMGT"[exp])
-}
-
-func formatETA(d time.Duration) string {
-	s := int64(d.Seconds())
-	h := s / 3600
-	m := (s % 3600) / 60
-	sec := s % 60
-	if h > 0 {
-		return fmt.Sprintf("%02d:%02d:%02d", h, m, sec)
-	}
-	return fmt.Sprintf("%02d:%02d", m, sec)
-}
-
-func formatSpeed(speed float64) string {
-	return formatBytes(speed) + "/s"
-}
-
-func parseSizeString(sizeStr string) int64 {
-	if sizeStr == "" || sizeStr == "Unknown" {
-		return 0
-	}
-	// Remove ~ prefix if present
-	sizeStr = strings.TrimPrefix(sizeStr, "~")
-
-	// Parse format like "15.2 MiB" or "1.5 GiB"
-	re := regexp.MustCompile(`([\d.]+)\s*([KMGT]?)i?B`)
-	matches := re.FindStringSubmatch(sizeStr)
-	if len(matches) < 3 {
-		return 0
-	}
-
-	val, err := strconv.ParseFloat(matches[1], 64)
-	if err != nil {
-		return 0
-	}
-
-	multiplier := float64(1024)
-	switch matches[2] {
-	case "K":
-		multiplier = 1024
-	case "M":
-		multiplier = 1024 * 1024
-	case "G":
-		multiplier = 1024 * 1024 * 1024
-	case "T":
-		multiplier = 1024 * 1024 * 1024 * 1024
-	default:
-		multiplier = 1
-	}
-
-	return int64(val * multiplier)
-}
-
-func truncateError(err string, maxLen int) string {
-	if len(err) <= maxLen {
-		return err
-	}
-	return err[:maxLen] + "..."
 }
 
 /* -------------------- Queue System -------------------- */
@@ -258,57 +199,24 @@ func extractResolution(resolution string) string {
 	return ""
 }
 
-// buildVideoFormatString creates format string with Code 2's superior codec handling
 func buildVideoFormatString(cleanRes string, preferH264 bool) string {
 	if cleanRes == "best" {
-		// For best quality with comprehensive codec fallbacks
-		// H.264 + AAC (best compatibility), then VP9, then AV1
-		return "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/" + // H.264 + AAC (best compatibility)
-			"bestvideo[vcodec^=avc1]+bestaudio/" + // H.264 + any audio
-			"bestvideo[vcodec^=vp9]+bestaudio[acodec^=mp4a]/" + // VP9 + AAC (reencode audio)
-			"bestvideo[vcodec^=vp9]+bestaudio/" + // VP9 + any audio
-			"bestvideo[vcodec^=av01]+bestaudio[acodec^=mp4a]/" + // AV1 + AAC
-			"bestvideo[vcodec^=av01]+bestaudio/" + // AV1 + any audio
-			"bestvideo+bestaudio[acodec^=mp4a]/" + // Any video + AAC
-			"bestvideo+bestaudio/best" // Ultimate fallback
+		// Comprehensive codec fallback for best quality
+		// Prioritize h264 for MP4 compatibility, then vp9, then av1
+		if preferH264 {
+			return "bestvideo[vcodec^=avc1][height<=2160]+bestaudio[acodec^=mp4a]/bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec^=vp9]+bestaudio/bestvideo+bestaudio/best"
+		}
+		return "bestvideo[vcodec^=vp9][height<=2160]+bestaudio/bestvideo[vcodec^=avc1][height<=2160]+bestaudio[acodec^=mp4a]/bestvideo[vcodec^=avc1]+bestaudio/bestvideo+bestaudio/best"
 	}
 
-	// For high resolutions (1440p, 2160p), H.264 is rarely available
-	// Prioritize VP9 and AV1 which are commonly used for high-res YouTube videos
-	resNum, _ := strconv.Atoi(cleanRes)
-	if resNum >= 1440 {
-		// High resolution: prioritize VP9/AV1 since H.264 usually not available
-		return fmt.Sprintf(
-			"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[acodec^=mp4a]/"+
-				"bestvideo[vcodec^=vp9][height<=%s]+bestaudio/"+
-				"bestvideo[vcodec^=av01][height<=%s]+bestaudio[acodec^=mp4a]/"+
-				"bestvideo[vcodec^=av01][height<=%s]+bestaudio/"+
-				"bestvideo[vcodec^=avc1][height<=%s]+bestaudio[acodec^=mp4a]/"+
-				"bestvideo[vcodec^=avc1][height<=%s]+bestaudio/"+
-				"bestvideo[height<=%s]+bestaudio[acodec^=mp4a]/"+
-				"bestvideo[height<=%s]+bestaudio/"+
-				"best[height<=%s]",
-			cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
-		)
-	}
+	// Specific resolution with codec fallback chain
+	// h264 (avc1) has best compatibility, vp9 has better quality/compression, av1 is newer
+	h264Format := fmt.Sprintf("bestvideo[vcodec^=avc1][height<=%s]+bestaudio[acodec^=mp4a]/bestvideo[vcodec^=avc1][height<=%s]+bestaudio/bestvideo[height<=%s]+bestaudio", cleanRes, cleanRes, cleanRes)
+	vp9Format := fmt.Sprintf("bestvideo[vcodec^=vp9][height<=%s]+bestaudio/bestvideo[vcodec^=vp9.2][height<=%s]+bestaudio/bestvideo[height<=%s]+bestaudio", cleanRes, cleanRes, cleanRes)
+	av1Format := fmt.Sprintf("bestvideo[vcodec^=av01][height<=%s]+bestaudio/bestvideo[height<=%s]+bestaudio", cleanRes, cleanRes)
 
-	// Standard resolution (1080p and below) with comprehensive codec fallback chains
-	// 1. H.264 + AAC (most reliable, always works in MP4)
-	// 2. H.264 + any audio (with audio conversion)
-	// 3. VP9 + AAC (reencode audio to AAC)
-	// 4. VP9 + Opus (may need remux)
-	// 5. Any video + AAC audio
-	// 6. Final fallback to best available
-	return fmt.Sprintf(
-		"bestvideo[vcodec^=avc1][height<=%s]+bestaudio[acodec^=mp4a]/"+
-			"bestvideo[vcodec^=avc1][height<=%s]+bestaudio/"+
-			"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[acodec^=mp4a]/"+
-			"bestvideo[vcodec^=vp9][height<=%s]+bestaudio/"+
-			"bestvideo[height<=%s]+bestaudio[acodec^=mp4a]/"+
-			"bestvideo[height<=%s]+bestaudio/"+
-			"best[height<=%s]",
-		cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
-	)
+	// Combine with fallback chain: h264 -> vp9 -> av1 -> generic
+	return h264Format + "/" + vp9Format + "/" + av1Format + "/bestvideo[height<=" + cleanRes + "]+bestaudio/best[height<=" + cleanRes + "]/best"
 }
 
 func buildAudioFormatString(format string) string {
@@ -399,23 +307,14 @@ func worker(downloadsContainer *fyne.Container, outputDir *string) {
 				mu.Unlock()
 
 				fyne.Do(func() {
-					if p.Percent() >= 100 {
-						progBar.SetValue(1)
-						statLbl.SetText("Processing… (merging)")
-						spdLbl.SetText("")
-						return
-					}
 					progBar.SetValue(p.Percent() / 100)
-					statLbl.SetText(fmt.Sprintf("Downloading… %.1f%%", p.Percent()))
-					spdLbl.SetText(fmt.Sprintf("Speed: %s | ETA: %s", formatSpeed(currentSpeed), formatETA(p.ETA())))
+					statLbl.SetText(fmt.Sprintf("%.1f%%", p.Percent()))
+					spdLbl.SetText(fmt.Sprintf("%s | ETA: %s", formatSpeed(currentSpeed), formatETA(p.ETA())))
 				})
 			}
 
 			var err error
 			outPath := *outputDir
-
-			// Update yt-dlp before starting download
-			updateYtDlp()
 
 			// Retry logic with exponential backoff
 			for attempt := 0; attempt < maxRetries; attempt++ {
@@ -432,21 +331,15 @@ func worker(downloadsContainer *fyne.Container, outputDir *string) {
 
 				if t.Type == "Video" {
 					format := buildVideoFormatString(t.CleanRes, true) // Prefer h264 for compatibility
-					dl := ytdlp.New().
+					_, err = ytdlp.New().
 						Format(format).
 						MergeOutputFormat("mp4").
 						NoKeepVideo().
 						NoKeepFragments().
-						RemuxVideo("mp4").
-						// Convert audio to m4a (AAC) for guaranteed MP4 compatibility
-						AudioFormat("m4a").
-						AudioQuality("0"). // Best quality
-						// Postprocessor options to ensure successful merge
-						PostProcessorArgs("FFmpegMerger:-c:v copy -c:a aac -b:a 192k").
+						RemuxVideo("mp4"). // Ensure proper container format
 						Output(filepath.Join(outPath, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
-						ProgressFunc(progressUpdateInterval, updateProgress)
-
-					_, err = dl.Run(ctx, t.URL)
+						ProgressFunc(progressUpdateInterval, updateProgress).
+						Run(ctx, t.URL)
 				} else {
 					format := buildAudioFormatString(t.AudioFormat)
 					_, err = ytdlp.New().
@@ -475,16 +368,7 @@ func worker(downloadsContainer *fyne.Container, outputDir *string) {
 					if ctx.Err() == context.Canceled {
 						statLbl.SetText("Cancelled")
 					} else {
-						// Check if it's a codec/merge related error
-						errStr := err.Error()
-						if strings.Contains(errStr, "codec") ||
-							strings.Contains(errStr, "merge") ||
-							strings.Contains(errStr, "ffmpeg") ||
-							strings.Contains(errStr, "postprocessor") {
-							statLbl.SetText("Failed: codec/merge error. Try lower resolution.")
-						} else {
-							statLbl.SetText("Failed: " + truncateError(err.Error(), 50))
-						}
+						statLbl.SetText("Failed: " + truncateError(err.Error(), 50))
 					}
 					progBar.SetValue(0)
 				} else {
@@ -495,6 +379,13 @@ func worker(downloadsContainer *fyne.Container, outputDir *string) {
 			})
 		}(task, taskCont, ctx, cancel)
 	}
+}
+
+func truncateError(err string, maxLen int) string {
+	if len(err) <= maxLen {
+		return err
+	}
+	return err[:maxLen] + "..."
 }
 
 /* -------------------- Main -------------------- */
@@ -585,7 +476,7 @@ func main() {
 		}
 	}
 
-	addBtn := widget.NewButton("Add to Queue", nil)
+	addBtn := widget.NewButton("Download", nil)
 	addBtn.Disable()
 
 	var tabs *container.AppTabs
@@ -832,34 +723,56 @@ func fetchVideoInfo(
 
 		resSelect.Options = opts
 		if len(opts) > 0 {
-			// Check if current selection is still valid in new options
-			currentSelection := resSelect.Selected
-			selectionValid := false
-			for _, opt := range opts {
-				if opt == currentSelection {
-					selectionValid = true
+			// Select best available quality by default, or first option
+			selectedIdx := 0
+			for i, opt := range opts {
+				if strings.Contains(opt, "1080p") || strings.Contains(opt, "720p") {
+					selectedIdx = i
 					break
 				}
 			}
-
-			// Only auto-select if current selection is empty or invalid
-			if !selectionValid || currentSelection == "" {
-				// Select best available quality by default (prefer 1080p, then 720p, then first)
-				selectedIdx := 0
-				for i, opt := range opts {
-					if strings.Contains(opt, "1080p") || strings.Contains(opt, "720p") {
-						selectedIdx = i
-						break
-					}
-				}
-				resSelect.SetSelected(opts[selectedIdx])
-			}
+			resSelect.SetSelected(opts[selectedIdx])
 			resSelect.Enable()
 			downloadBtn.Enable()
 			statusLabel.SetText("Ready to download")
 		} else {
 			statusLabel.SetText("No video formats found")
 		}
-
 	})
+}
+
+func parseSizeString(sizeStr string) int64 {
+	if sizeStr == "" || sizeStr == "Unknown" {
+		return 0
+	}
+	// Remove ~ prefix if present
+	sizeStr = strings.TrimPrefix(sizeStr, "~")
+
+	// Parse format like "15.2 MiB" or "1.5 GiB"
+	re := regexp.MustCompile(`([\d.]+)\s*([KMGT]?)i?B`)
+	matches := re.FindStringSubmatch(sizeStr)
+	if len(matches) < 3 {
+		return 0
+	}
+
+	val, err := strconv.ParseFloat(matches[1], 64)
+	if err != nil {
+		return 0
+	}
+
+	multiplier := float64(1024)
+	switch matches[2] {
+	case "K":
+		multiplier = 1024
+	case "M":
+		multiplier = 1024 * 1024
+	case "G":
+		multiplier = 1024 * 1024 * 1024
+	case "T":
+		multiplier = 1024 * 1024 * 1024 * 1024
+	default:
+		multiplier = 1
+	}
+
+	return int64(val * multiplier)
 }
