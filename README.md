@@ -59,8 +59,36 @@ That's it. The app shows progress in real-time and you can cancel anytime.
 - Audio gets extracted in whatever format you chose.
 - Download history is saved locally so you can find your files later.
 
-## Legal stuff
+## Disclaimer
 
-This is for personal use only. Don't download stuff you don't have rights to. Respect copyright and YouTube's terms. I'm not responsible for what you do with this tool.
+**IMPORTANT LEGAL NOTICE**
 
-MIT License - do what you want with the code, just don't blame me if something breaks.
+This application is provided for educational and personal use only. Users are solely responsible for compliance with all applicable laws and regulations in their jurisdiction. 
+
+### Legal Considerations
+
+- **Copyright Compliance**: Users must respect copyright laws and YouTube's Terms of Service. Downloading copyrighted content without proper authorization may be illegal in your jurisdiction.
+- **Terms of Service**: By using this application, you acknowledge that you are bound by YouTube's Terms of Service and agree not to violate them.
+- **Personal Use Only**: This tool is intended for downloading content you own or have permission to download.
+- **Liability**: The authors and contributors of Predator are not responsible for:
+  - Any copyright infringement or violations of third-party rights
+  - Misuse of downloaded content
+  - Any legal consequences arising from use of this application
+  - Data loss or corruption
+  - Any other damages resulting from use of this software
+
+### Responsible Use
+
+Users should:
+- Only download content they have permission to download
+- Respect content creators' rights and intellectual property
+- Use downloaded content in compliance with local laws
+- Not distribute copyrighted content without proper licensing
+- Be aware that many YouTube videos are protected by copyright
+
+### No Warranty
+
+This application is provided "as-is" without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, or non-infringement.
+
+The authors assume no responsibility for any illegal activities or misuse of this tool. By using Predator, you accept all risks and responsibilities associated with your downloads.
+
