@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Predator
 
 
@@ -58,6 +59,120 @@ That's it. The app shows progress in real-time and you can cancel anytime.
 - Videos get merged into a single MP4 file with H.264 codec for compatibility.
 - Audio gets extracted in whatever format you chose.
 - Download history is saved locally so you can find your files later.
+=======
+# Predator - YouTube Downloader
+<p align="center">
+<img src="asset/Predatorv1.png">
+</p>
+A modern, cross-platform desktop application for downloading videos and audio from YouTube .
+It is built using Go and the Fyne GUI framework, with yt-dlp as the download engine.
+
+The project focuses on simplicity, transparency, and responsive user experience while keeping the implementation clean and maintainable.
+
+## Features
+
+- **Video Download**: Download YouTube videos in various resolutions (144p to 2160p)
+- **Audio Extraction**: Extract audio from videos in multiple formats (MP3, M4A, Opus, WAV)
+- **Real-time Metadata**: Fetches video information dynamically, showing available resolutions with file sizes
+- **Progress Tracking**: Live download progress ETA information
+- **Cancellable Downloads**: Stop downloads at any time
+- **Custom Output Directory**: Select and manage your download location
+- **Cross-platform**: Works on Windows, macOS, and Linux
+
+## Requirements
+
+- **Go**: 1.24.0 or higher
+- **FFmpeg**: Required for audio extraction and video merging (automatically handled by yt-dlp)
+- **yt-dlp**: Automatically installed on first run
+
+## Installation
+
+### Clone the Repository
+```bash
+git clone https://github.com/Aswanidev-vs/Predator.git
+cd Predator
+```
+
+### Install Dependencies
+```bash
+go mod download
+```
+
+### Build and Run
+```bash
+go run main.go
+```
+
+### Build for Distribution
+The project includes cross-platform build configuration in the `fyne-cross` directory:
+
+```bash
+# For Windows
+go install fyne.io/tools/cmd/fyne-cross@latest
+fyne-cross windows
+
+# For macOS
+fyne-cross darwin
+
+# For Linux
+fyne-cross linux
+```
+
+## Usage
+
+1. **Launch the Application**: Run the executable or `go run main.go`
+2. **Set Download Location**: Click "Change Download Location" to select where videos will be saved
+3. **Paste YouTube URL**: Paste a YouTube video link into the URL field
+4. **Select Download Type**:
+   - **Video**: Choose a resolution and video will be downloaded with best audio merged
+   - **Audio**: Choose an audio format (MP3, M4A, Opus, WAV)
+5. **Click Download**: Start the download process
+6. **Monitor Progress**: Watch real-time progress, speed, and ETA
+7. **Cancel if Needed**: Click Cancel button to stop an ongoing download
+
+## Architecture
+
+### Main Components
+
+- **UI Layer**: Built with [Fyne](https://fyne.io/) - a cross-platform GUI framework
+- **Download Engine**: Powered by [go-ytdlp](https://github.com/lrstanley/go-ytdlp) - a Go wrapper for yt-dlp
+- **Async Operations**: Uses goroutines for non-blocking UI interactions
+- **Progress Tracking**: Real-time progress callbacks with ETA calculations
+
+### Key Functions
+
+- `main()`: Initializes the UI and event handlers
+- `fetchVideoInfo()`: Dynamically fetches video metadata and available resolutions
+- `formatBytes()`: Converts byte sizes to human-readable format
+- `formatETA()`: Converts duration to HH:MM:SS format
+
+## Project Structure
+
+```
+Predator/
+├── main.go              # Main application code
+├── go.mod              # Go module definition
+├── go.sum              # Go module checksums
+├── logov4.png          # Application icon
+├── asset/              # Icon and logo assets
+├── fyne-cross/         # Cross-platform build configuration
+├── sample.txt          # Code sample reference
+└── samplev*.txt        # Additional code samples
+```
+
+## Dependencies
+
+- **fyne.io/fyne/v2**: Cross-platform GUI framework
+- **github.com/lrstanley/go-ytdlp**: Go wrapper for yt-dlp
+
+
+## Performance
+
+- **Lazy Metadata Loading**: Video info is only fetched when a valid URL is entered
+- **Debounced Input**: 600ms debounce on URL input to prevent excessive API calls
+- **Atomic Operations**: Thread-safe state management for concurrent operations
+- **Streaming Download**: Supports live progress updates during download
+>>>>>>> 5c9da659bc26ab9faf682fb549dc7e0b599a7169
 
 ## Disclaimer
 
@@ -92,3 +207,37 @@ This application is provided "as-is" without warranty of any kind, express or im
 
 The authors assume no responsibility for any illegal activities or misuse of this tool. By using Predator, you accept all risks and responsibilities associated with your downloads.
 
+<<<<<<< HEAD
+=======
+## License
+
+MIT License
+
+Copyright (c) 2025 Aswanidev-vs
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## Contributing
+
+Contributions are welcome! Feel free to submit issues and pull requests.
+
+
+
+**Note**: This application requires an active internet connection to download from YouTube and relies on the yt-dlp project to function.
+>>>>>>> 5c9da659bc26ab9faf682fb549dc7e0b599a7169
