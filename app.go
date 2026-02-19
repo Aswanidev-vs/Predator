@@ -814,6 +814,12 @@ func (a *App) extractFFmpeg(zipPath, destDir string) error {
 				return err
 			}
 
+			// Validate archive entry name to prevent directory traversal / Zip Slip
+			if strings.Contains(f.Name, "..") || filepath.IsAbs(f.Name) {
+				rc.Close()
+				continue
+			}
+
 			destPath := filepath.Join(destDir, filepath.Base(f.Name))
 			out, err := os.Create(destPath)
 			if err != nil {
