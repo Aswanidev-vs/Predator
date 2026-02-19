@@ -45,11 +45,7 @@ require (
 	golang.org/x/text v0.34.0 // indirect
 )
 
-// replace github.com/wailsapp/wails/v2 v2.11.0 => C:\Users\LENOVO\go\pkg\mod
-=======
-	fyne.io/fyne/v2 v2.7.2
-	github.com/lrstanley/go-ytdlp v1.3.0
-)
+
 
 require (
 	fyne.io/systray v1.12.0 // indirect
