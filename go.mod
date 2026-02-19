@@ -1,13 +1,13 @@
-<<<<<<< HEAD
-module Predator
-=======
+
+
+
 module predator
->>>>>>> 5c9da659bc26ab9faf682fb549dc7e0b599a7169
+
 
 go 1.25.0
 
 require (
-<<<<<<< HEAD
+
 	github.com/lrstanley/go-ytdlp v1.3.0
 	github.com/wailsapp/wails/v2 v2.11.0
 )
@@ -92,4 +92,3 @@ require (
 	golang.org/x/text v0.34.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
->>>>>>> 5c9da659bc26ab9faf682fb549dc7e0b599a7169
