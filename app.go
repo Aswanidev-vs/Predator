@@ -380,82 +380,76 @@ func extractResolution(resolution string) string {
 
 func buildVideoFormatString(cleanRes string, preferH264 bool) string {
 	// Build format string that handles all codecs (h264, vp9, av1)
-	// ffmpeg will transcode to h264/aac for mp4 compatibility if needed
-	// Use bestaudio/best to allow any audio format - ffmpeg will convert as needed
+	// CRITICAL: Always use m4a audio for mp4 container compatibility
+	// webm/opus audio causes ffmpeg merge failures with mp4 video
 
 	if cleanRes == "best" {
-		// Try h264 first, then vp9, then av1, then any best
-		// Audio: prefer m4a/aac but accept any audio format (ffmpeg will transcode)
+		// Try h264 first, then vp9, then av1
+		// Audio: STRICTLY m4a/aac only to ensure mp4 compatibility
 		return "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/" +
 			"bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/" +
-			"bestvideo[vcodec^=avc1]+bestaudio/" +
 			"bestvideo[vcodec^=vp9]+bestaudio[ext=m4a]/" +
 			"bestvideo[vcodec^=vp9]+bestaudio[acodec^=mp4a]/" +
-			"bestvideo[vcodec^=vp9]+bestaudio/" +
 			"bestvideo[vcodec^=av01]+bestaudio[ext=m4a]/" +
 			"bestvideo[vcodec^=av01]+bestaudio[acodec^=mp4a]/" +
-			"bestvideo[vcodec^=av01]+bestaudio/" +
+			"bestvideo+bestaudio[ext=m4a]/" +
+			"bestvideo+bestaudio[acodec^=mp4a]/" +
 			"bestvideo+bestaudio/best"
 	}
 
 	resNum, _ := strconv.Atoi(cleanRes)
 	if resNum >= 1440 {
 		// High resolutions - try exact height first, then fall back to <=
-		// This ensures 4K/8K videos actually download at correct resolution
+		// STRICTLY m4a audio only to prevent ffmpeg merge failures
 		return fmt.Sprintf(
-			// Try exact height match first with m4a audio (most compatible)
+			// Try exact height match first with m4a audio only
 			"bestvideo[vcodec^=avc1][height=%s]+bestaudio[ext=m4a]/"+
 				"bestvideo[vcodec^=avc1][height=%s]+bestaudio[acodec^=mp4a]/"+
-				"bestvideo[vcodec^=avc1][height=%s]+bestaudio/"+
 				"bestvideo[vcodec^=vp9][height=%s]+bestaudio[ext=m4a]/"+
 				"bestvideo[vcodec^=vp9][height=%s]+bestaudio[acodec^=mp4a]/"+
-				"bestvideo[vcodec^=vp9][height=%s]+bestaudio/"+
 				"bestvideo[vcodec^=av01][height=%s]+bestaudio[ext=m4a]/"+
 				"bestvideo[vcodec^=av01][height=%s]+bestaudio[acodec^=mp4a]/"+
-				"bestvideo[vcodec^=av01][height=%s]+bestaudio/"+
-				// Fall back to <= if exact match not available
+				// Fall back to <= if exact match not available - still m4a only
 				"bestvideo[vcodec^=avc1][height<=%s]+bestaudio[ext=m4a]/"+
 				"bestvideo[vcodec^=avc1][height<=%s]+bestaudio[acodec^=mp4a]/"+
-				"bestvideo[vcodec^=avc1][height<=%s]+bestaudio/"+
 				"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[ext=m4a]/"+
 				"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[acodec^=mp4a]/"+
-				"bestvideo[vcodec^=vp9][height<=%s]+bestaudio/"+
 				"bestvideo[vcodec^=av01][height<=%s]+bestaudio[ext=m4a]/"+
 				"bestvideo[vcodec^=av01][height<=%s]+bestaudio[acodec^=mp4a]/"+
-				"bestvideo[vcodec^=av01][height<=%s]+bestaudio/"+
-				"bestvideo[height<=%s]+bestaudio/"+
+				// Final fallbacks - still prefer m4a
+				"bestvideo[height<=%s]+bestaudio[ext=m4a]/"+
+				"bestvideo[height<=%s]+bestaudio[acodec^=mp4a]/"+
 				"best[height<=%s]",
-			cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
-			cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
+			cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
+			cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
+			cleanRes, cleanRes, cleanRes,
 		)
 	}
 
 	// Standard resolutions - try exact height first, then fall back
+	// STRICTLY m4a audio only to prevent ffmpeg merge failures
 	return fmt.Sprintf(
-		// Try exact height match first with m4a audio (most compatible)
+		// Try exact height match first with m4a audio only
 		"bestvideo[vcodec^=avc1][height=%s]+bestaudio[ext=m4a]/"+
 			"bestvideo[vcodec^=avc1][height=%s]+bestaudio[acodec^=mp4a]/"+
-			"bestvideo[vcodec^=avc1][height=%s]+bestaudio/"+
 			"bestvideo[vcodec^=vp9][height=%s]+bestaudio[ext=m4a]/"+
 			"bestvideo[vcodec^=vp9][height=%s]+bestaudio[acodec^=mp4a]/"+
-			"bestvideo[vcodec^=vp9][height=%s]+bestaudio/"+
 			"bestvideo[vcodec^=av01][height=%s]+bestaudio[ext=m4a]/"+
 			"bestvideo[vcodec^=av01][height=%s]+bestaudio[acodec^=mp4a]/"+
-			"bestvideo[vcodec^=av01][height=%s]+bestaudio/"+
-			// Fall back to <= if exact match not available
+			// Fall back to <= if exact match not available - still m4a only
 			"bestvideo[vcodec^=avc1][height<=%s]+bestaudio[ext=m4a]/"+
 			"bestvideo[vcodec^=avc1][height<=%s]+bestaudio[acodec^=mp4a]/"+
-			"bestvideo[vcodec^=avc1][height<=%s]+bestaudio/"+
 			"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[ext=m4a]/"+
 			"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[acodec^=mp4a]/"+
-			"bestvideo[vcodec^=vp9][height<=%s]+bestaudio/"+
 			"bestvideo[vcodec^=av01][height<=%s]+bestaudio[ext=m4a]/"+
 			"bestvideo[vcodec^=av01][height<=%s]+bestaudio[acodec^=mp4a]/"+
-			"bestvideo[vcodec^=av01][height<=%s]+bestaudio/"+
-			"bestvideo[height<=%s]+bestaudio/"+
+			// Final fallbacks - still prefer m4a
+			"bestvideo[height<=%s]+bestaudio[ext=m4a]/"+
+			"bestvideo[height<=%s]+bestaudio[acodec^=mp4a]/"+
 			"best[height<=%s]",
-		cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
-		cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
+		cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
+		cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
+		cleanRes, cleanRes, cleanRes,
 	)
 }
 
@@ -1345,13 +1339,17 @@ func (a *App) worker(task DownloadTask, taskID string) {
 				ProgressFunc(progressUpdateInterval, updateProgress)
 
 			// For MP3 and WAV, we need to ensure proper conversion from webm/opus sources
-			// Add postprocessor args to handle codec conversion properly
+			// Add postprocessor args to force re-encoding to the target format
 			if task.AudioFormat == "mp3" {
-				// Force re-encode to MP3 with proper settings
-				dl = dl.PostProcessorArgs("FFmpegExtractAudio:-q:a 2")
+				// Force re-encode to MP3 with high quality VBR (V0 ~ 245kbps)
+				// Using -id3v2_version 3 for better compatibility
+				dl = dl.PostProcessorArgs("FFmpegExtractAudio:-q:a 0 -id3v2_version 3")
 			} else if task.AudioFormat == "wav" {
-				// Force re-encode to WAV
-				dl = dl.PostProcessorArgs("FFmpegExtractAudio:-acodec pcm_s16le -ar 44100")
+				// Force re-encode to WAV 16-bit PCM 44.1kHz
+				dl = dl.PostProcessorArgs("FFmpegExtractAudio:-acodec pcm_s16le -ar 44100 -ac 2")
+			} else if task.AudioFormat == "m4a" {
+				// For m4a, ensure we're using AAC codec
+				dl = dl.PostProcessorArgs("FFmpegExtractAudio:-c:a aac -b:a 192k")
 			}
 
 			_, err = dl.Run(ctx, task.URL)
