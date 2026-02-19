@@ -1,17 +1,17 @@
 module predator
 
-go 1.24.0
+go 1.25.0
 
 require (
-	fyne.io/fyne/v2 v2.7.1
-	github.com/lrstanley/go-ytdlp v1.2.7
+	fyne.io/fyne/v2 v2.7.2
+	github.com/lrstanley/go-ytdlp v1.3.0
 )
 
 require (
-	fyne.io/systray v1.11.1-0.20250603113521-ca66a66d8b58 // indirect
+	fyne.io/systray v1.12.0 // indirect
 	github.com/BurntSushi/toml v1.5.0 // indirect
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
-	github.com/cloudflare/circl v1.6.1 // indirect
+	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/fredbi/uri v1.1.1 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
@@ -36,12 +36,15 @@ require (
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
+	github.com/ulikunitz/xz v0.5.15 // indirect
+	github.com/yuin/goldmark v1.7.8 // indirect
+	golang.org/x/crypto v0.48.0 // indirect
 	github.com/ulikunitz/xz v0.5.14 // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect
 	golang.org/x/crypto v0.45.0 // indirect
 	golang.org/x/image v0.24.0 // indirect
-	golang.org/x/net v0.47.0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
-	golang.org/x/text v0.32.0 // indirect
+	golang.org/x/net v0.49.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

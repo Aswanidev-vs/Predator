@@ -9,7 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -92,7 +95,56 @@ func checkAndInstallDeps(w fyne.Window) error {
 
 const prefOutputDir = "output_dir"
 
+/* -------------------- Constants -------------------- */
+
+const (
+	maxConcurrentDownloads = 3
+	progressUpdateInterval = 200 * time.Millisecond
+	speedSmoothingAlpha    = 0.2
+	taskQueueSize          = 100
+	cleanupDelay           = 2 * time.Second
+	fetchTimeout           = 30 * time.Second
+	fetchDebounceDelay     = 600 * time.Millisecond
+	maxRetries             = 3
+	retryBaseDelay         = 2 * time.Second
+)
+
+/* -------------------- URL Validation -------------------- */
+
+var youtubeURLPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+`),
+	regexp.MustCompile(`^(https?://)?(www\.)?youtube\.com/watch\?v=[\w-]+`),
+	regexp.MustCompile(`^(https?://)?(www\.)?youtu\.be/[\w-]+`),
+	regexp.MustCompile(`^(https?://)?(www\.)?youtube\.com/shorts/[\w-]+`),
+	regexp.MustCompile(`^(https?://)?(www\.)?youtube\.com/live/[\w-]+`),
+}
+
+func isValidYouTubeURL(url string) bool {
+	for _, pattern := range youtubeURLPatterns {
+		if pattern.MatchString(url) {
+			return true
+		}
+	}
+	return false
+}
+
 /* -------------------- Helpers -------------------- */
+
+// updateYtDlp explicitly updates yt-dlp to the latest version
+func updateYtDlp() error {
+	log.Println("Updating yt-dlp to latest version...")
+	// Call Install which should update to latest version
+	// The second parameter can be used to specify options
+	_, err := ytdlp.Install(context.Background(), nil)
+	if err != nil {
+		// Try with MustInstall as fallback
+		log.Println("yt-dlp.Install failed, trying MustInstall:", err)
+		ytdlp.MustInstall(context.Background(), nil)
+		return err
+	}
+	log.Println("yt-dlp updated successfully")
+	return nil
+}
 
 func formatBytes(b float64) string {
 	const unit = 1024
@@ -120,6 +172,329 @@ func formatETA(d time.Duration) string {
 
 func formatSpeed(speed float64) string {
 	return formatBytes(speed) + "/s"
+}
+
+func parseSizeString(sizeStr string) int64 {
+	if sizeStr == "" || sizeStr == "Unknown" {
+		return 0
+	}
+	// Remove ~ prefix if present
+	sizeStr = strings.TrimPrefix(sizeStr, "~")
+
+	// Parse format like "15.2 MiB" or "1.5 GiB"
+	re := regexp.MustCompile(`([\d.]+)\s*([KMGT]?)i?B`)
+	matches := re.FindStringSubmatch(sizeStr)
+	if len(matches) < 3 {
+		return 0
+	}
+
+	val, err := strconv.ParseFloat(matches[1], 64)
+	if err != nil {
+		return 0
+	}
+
+	multiplier := float64(1024)
+	switch matches[2] {
+	case "K":
+		multiplier = 1024
+	case "M":
+		multiplier = 1024 * 1024
+	case "G":
+		multiplier = 1024 * 1024 * 1024
+	case "T":
+		multiplier = 1024 * 1024 * 1024 * 1024
+	default:
+		multiplier = 1
+	}
+
+	return int64(val * multiplier)
+}
+
+func truncateError(err string, maxLen int) string {
+	if len(err) <= maxLen {
+		return err
+	}
+	return err[:maxLen] + "..."
+}
+
+/* -------------------- Queue System -------------------- */
+
+type DownloadTask struct {
+	URL          string
+	Title        string
+	Type         string
+	Resolution   string // Display text like "720p (15.2 MiB)"
+	CleanRes     string // Clean resolution like "720" or "best"
+	AudioFormat  string
+	AudioQuality string
+	VideoCodec   string // Preferred video codec
+}
+
+var (
+	taskQueue = make(chan DownloadTask, taskQueueSize)
+	sem       chan struct{}
+	semOnce   sync.Once
+)
+
+func initSemaphore() {
+	semOnce.Do(func() {
+		sem = make(chan struct{}, maxConcurrentDownloads)
+		for i := 0; i < maxConcurrentDownloads; i++ {
+			sem <- struct{}{}
+		}
+	})
+}
+
+func extractResolution(resolution string) string {
+	// Extract just the resolution number from strings like "720p (15.2 MiB)"
+	re := regexp.MustCompile(`^(\d+)p`)
+	matches := re.FindStringSubmatch(resolution)
+	if len(matches) > 1 {
+		return matches[1]
+	}
+	if strings.HasPrefix(resolution, "best") {
+		return "best"
+	}
+	return ""
+}
+
+// buildVideoFormatString creates format string with Code 2's superior codec handling
+func buildVideoFormatString(cleanRes string, preferH264 bool) string {
+	if cleanRes == "best" {
+		// For best quality with comprehensive codec fallbacks
+		// H.264 + AAC (best compatibility), then VP9, then AV1
+		return "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/" + // H.264 + AAC (best compatibility)
+			"bestvideo[vcodec^=avc1]+bestaudio/" + // H.264 + any audio
+			"bestvideo[vcodec^=vp9]+bestaudio[acodec^=mp4a]/" + // VP9 + AAC (reencode audio)
+			"bestvideo[vcodec^=vp9]+bestaudio/" + // VP9 + any audio
+			"bestvideo[vcodec^=av01]+bestaudio[acodec^=mp4a]/" + // AV1 + AAC
+			"bestvideo[vcodec^=av01]+bestaudio/" + // AV1 + any audio
+			"bestvideo+bestaudio[acodec^=mp4a]/" + // Any video + AAC
+			"bestvideo+bestaudio/best" // Ultimate fallback
+	}
+
+	// For high resolutions (1440p, 2160p), H.264 is rarely available
+	// Prioritize VP9 and AV1 which are commonly used for high-res YouTube videos
+	resNum, _ := strconv.Atoi(cleanRes)
+	if resNum >= 1440 {
+		// High resolution: prioritize VP9/AV1 since H.264 usually not available
+		return fmt.Sprintf(
+			"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[acodec^=mp4a]/"+
+				"bestvideo[vcodec^=vp9][height<=%s]+bestaudio/"+
+				"bestvideo[vcodec^=av01][height<=%s]+bestaudio[acodec^=mp4a]/"+
+				"bestvideo[vcodec^=av01][height<=%s]+bestaudio/"+
+				"bestvideo[vcodec^=avc1][height<=%s]+bestaudio[acodec^=mp4a]/"+
+				"bestvideo[vcodec^=avc1][height<=%s]+bestaudio/"+
+				"bestvideo[height<=%s]+bestaudio[acodec^=mp4a]/"+
+				"bestvideo[height<=%s]+bestaudio/"+
+				"best[height<=%s]",
+			cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
+		)
+	}
+
+	// Standard resolution (1080p and below) with comprehensive codec fallback chains
+	// 1. H.264 + AAC (most reliable, always works in MP4)
+	// 2. H.264 + any audio (with audio conversion)
+	// 3. VP9 + AAC (reencode audio to AAC)
+	// 4. VP9 + Opus (may need remux)
+	// 5. Any video + AAC audio
+	// 6. Final fallback to best available
+	return fmt.Sprintf(
+		"bestvideo[vcodec^=avc1][height<=%s]+bestaudio[acodec^=mp4a]/"+
+			"bestvideo[vcodec^=avc1][height<=%s]+bestaudio/"+
+			"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[acodec^=mp4a]/"+
+			"bestvideo[vcodec^=vp9][height<=%s]+bestaudio/"+
+			"bestvideo[height<=%s]+bestaudio[acodec^=mp4a]/"+
+			"bestvideo[height<=%s]+bestaudio/"+
+			"best[height<=%s]",
+		cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
+	)
+}
+
+func buildAudioFormatString(format string) string {
+	// Audio codec priority: aac (m4a) > opus > mp3 > best
+	switch format {
+	case "m4a":
+		return "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best"
+	case "opus":
+		return "bestaudio[ext=opus]/bestaudio[acodec^=opus]/bestaudio/best"
+	case "mp3":
+		return "bestaudio[ext=mp3]/bestaudio/best"
+	case "wav":
+		return "bestaudio[ext=wav]/bestaudio/best"
+	default:
+		return "bestaudio/best"
+	}
+}
+
+func worker(downloadsContainer *fyne.Container, outputDir *string) {
+	initSemaphore()
+
+	for task := range taskQueue {
+		<-sem
+
+		titleLbl := widget.NewLabel(task.Title)
+		titleLbl.Wrapping = fyne.TextWrapWord
+		titleLbl.TextStyle = fyne.TextStyle{Bold: true}
+
+		progBar := widget.NewProgressBar()
+		statLbl := widget.NewLabel("Starting...")
+		spdLbl := widget.NewLabel("")
+		cancelBtn := widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), nil)
+
+		taskCont := container.NewVBox(
+			widget.NewSeparator(),
+			titleLbl,
+			container.NewBorder(nil, nil, nil, cancelBtn, progBar),
+			container.NewHBox(statLbl, spdLbl),
+		)
+
+		fyne.Do(func() {
+			downloadsContainer.Add(taskCont)
+			downloadsContainer.Refresh()
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelBtn.OnTapped = func() {
+			cancel()
+			cancelBtn.Disable()
+			statLbl.SetText("Cancelling...")
+		}
+
+		go func(t DownloadTask, c *fyne.Container, ctx context.Context, cancel context.CancelFunc) {
+			defer func() {
+				sem <- struct{}{}
+				time.Sleep(cleanupDelay)
+				fyne.Do(func() {
+					downloadsContainer.Remove(c)
+					downloadsContainer.Refresh()
+				})
+			}()
+
+			var lastDownloaded int
+			var lastTime = time.Now()
+			var smoothedSpeed float64
+			var mu sync.Mutex // Protect progress variables
+
+			updateProgress := func(p ytdlp.ProgressUpdate) {
+				if p.Status != "downloading" {
+					return
+				}
+
+				mu.Lock()
+				now := time.Now()
+				elapsed := now.Sub(lastTime).Seconds()
+				var speed float64
+				if elapsed > 0 {
+					speed = float64(p.DownloadedBytes-lastDownloaded) / elapsed
+				}
+				if smoothedSpeed == 0 {
+					smoothedSpeed = speed
+				} else {
+					smoothedSpeed = speedSmoothingAlpha*speed + (1-speedSmoothingAlpha)*smoothedSpeed
+				}
+				lastDownloaded = p.DownloadedBytes
+				lastTime = now
+				currentSpeed := smoothedSpeed
+				mu.Unlock()
+
+				fyne.Do(func() {
+					if p.Percent() >= 100 {
+						progBar.SetValue(1)
+						statLbl.SetText("Processing… (merging)")
+						spdLbl.SetText("")
+						return
+					}
+					progBar.SetValue(p.Percent() / 100)
+					statLbl.SetText(fmt.Sprintf("Downloading… %.1f%%", p.Percent()))
+					spdLbl.SetText(fmt.Sprintf("Speed: %s | ETA: %s", formatSpeed(currentSpeed), formatETA(p.ETA())))
+				})
+			}
+
+			var err error
+			outPath := *outputDir
+
+			// Update yt-dlp before starting download
+			updateYtDlp()
+
+			// Retry logic with exponential backoff
+			for attempt := 0; attempt < maxRetries; attempt++ {
+				if attempt > 0 {
+					fyne.Do(func() {
+						statLbl.SetText(fmt.Sprintf("Retrying... (attempt %d/%d)", attempt+1, maxRetries))
+					})
+					time.Sleep(time.Duration(attempt) * retryBaseDelay)
+				}
+
+				if ctx.Err() == context.Canceled {
+					break
+				}
+
+				if t.Type == "Video" {
+					format := buildVideoFormatString(t.CleanRes, true) // Prefer h264 for compatibility
+					dl := ytdlp.New().
+						Format(format).
+						MergeOutputFormat("mp4").
+						NoKeepVideo().
+						NoKeepFragments().
+						RemuxVideo("mp4").
+						// Convert audio to m4a (AAC) for guaranteed MP4 compatibility
+						AudioFormat("m4a").
+						AudioQuality("0"). // Best quality
+						// Postprocessor options to ensure successful merge
+						PostProcessorArgs("FFmpegMerger:-c:v copy -c:a aac -b:a 192k").
+						Output(filepath.Join(outPath, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
+						ProgressFunc(progressUpdateInterval, updateProgress)
+
+					_, err = dl.Run(ctx, t.URL)
+				} else {
+					format := buildAudioFormatString(t.AudioFormat)
+					_, err = ytdlp.New().
+						ExtractAudio().
+						AudioFormat(t.AudioFormat).
+						AudioQuality("0"). // Best quality
+						Format(format).
+						Output(filepath.Join(outPath, "%(title)s [%(id)s].%(ext)s")).
+						ProgressFunc(progressUpdateInterval, updateProgress).
+						Run(ctx, t.URL)
+				}
+
+				if err == nil {
+					break // Success
+				}
+
+				// Check if error is retryable
+				if ctx.Err() == context.Canceled {
+					break
+				}
+			}
+
+			fyne.Do(func() {
+				cancelBtn.Disable()
+				if err != nil {
+					if ctx.Err() == context.Canceled {
+						statLbl.SetText("Cancelled")
+					} else {
+						// Check if it's a codec/merge related error
+						errStr := err.Error()
+						if strings.Contains(errStr, "codec") ||
+							strings.Contains(errStr, "merge") ||
+							strings.Contains(errStr, "ffmpeg") ||
+							strings.Contains(errStr, "postprocessor") {
+							statLbl.SetText("Failed: codec/merge error. Try lower resolution.")
+						} else {
+							statLbl.SetText("Failed: " + truncateError(err.Error(), 50))
+						}
+					}
+					progBar.SetValue(0)
+				} else {
+					progBar.SetValue(1)
+					statLbl.SetText("Completed ✓")
+				}
+				spdLbl.SetText("")
+			})
+		}(task, taskCont, ctx, cancel)
+	}
 }
 
 /* -------------------- Main -------------------- */
@@ -157,7 +532,7 @@ func main() {
 		isDark = !isDark
 	})
 
-	headerLabel := widget.NewLabel("YouTube URL")
+	headerLabel := widget.NewLabel("Predator")
 	headerContainer := container.NewBorder(nil, nil, headerLabel, themeBtn)
 
 	/* -------------------- UI -------------------- */
@@ -210,18 +585,14 @@ func main() {
 		}
 	}
 
-	progressBar := widget.NewProgressBar()
-	statusLabel := widget.NewLabel("")
-	speedLabel := widget.NewLabel("")
+	addBtn := widget.NewButton("Add to Queue", nil)
+	addBtn.Disable()
 
-	downloadBtn := widget.NewButton("Download", nil)
-	downloadBtn.Disable()
-
-	cancelBtn := widget.NewButton("Cancel", nil)
-	cancelBtn.Disable()
+	var tabs *container.AppTabs
 
 	titleLabel := widget.NewLabel("")
 	titleLabel.Wrapping = fyne.TextWrapWord
+	statusLabel := widget.NewLabel("Ready")
 	/* -------------------- Output Dir -------------------- */
 
 	outputDir := prefs.String(prefOutputDir)
@@ -265,10 +636,27 @@ func main() {
 			fetchTimer.Stop()
 		}
 		if text == "" {
+			fyne.Do(func() {
+				statusLabel.SetText("Ready")
+				titleLabel.SetText("")
+				resSelect.Disable()
+				addBtn.Disable()
+			})
 			return
 		}
 
-		fetchTimer = time.AfterFunc(600*time.Millisecond, func() {
+		// Validate URL before fetching
+		if !isValidYouTubeURL(text) {
+			fyne.Do(func() {
+				statusLabel.SetText("Invalid YouTube URL")
+				titleLabel.SetText("")
+				resSelect.Disable()
+				addBtn.Disable()
+			})
+			return
+		}
+
+		fetchTimer = time.AfterFunc(fetchDebounceDelay, func() {
 			if atomic.LoadInt32(&fetching) == 1 {
 				return
 			}
@@ -277,206 +665,69 @@ func main() {
 			fyne.Do(func() {
 				statusLabel.SetText("Fetching video info...")
 				resSelect.Disable()
-				downloadBtn.Disable()
+				addBtn.Disable()
 			})
 
-			go fetchVideoInfo(text, resolutions, resSelect, statusLabel, titleLabel, downloadBtn, &fetching)
+			go fetchVideoInfo(text, resolutions, resSelect, statusLabel, titleLabel, addBtn, &fetching)
 		})
 	}
 
 	/* -------------------- Download -------------------- */
 
-	var cancelFunc context.CancelFunc
-	var downloading int32
-
-	downloadBtn.OnTapped = func() {
-		if atomic.LoadInt32(&downloading) == 1 {
-			return
-		}
-
+	addBtn.OnTapped = func() {
 		url := strings.TrimSpace(urlEntry.Text)
-		if url == "" {
+		if url == "" || !isValidYouTubeURL(url) {
+			dialog.ShowError(fmt.Errorf("Please enter a valid YouTube URL"), w)
 			return
 		}
 
-		ctx, cancel := context.WithCancel(context.Background())
-		cancelFunc = cancel
-		atomic.StoreInt32(&downloading, 1)
+		cleanRes := extractResolution(resSelect.Selected)
+		task := DownloadTask{
+			URL:         url,
+			Title:       strings.TrimPrefix(titleLabel.Text, "Title : "),
+			Type:        downloadType.Selected,
+			Resolution:  resSelect.Selected,
+			CleanRes:    cleanRes,
+			AudioFormat: audioSelect.Selected,
+		}
+		taskQueue <- task
 
-		progressBar.SetValue(0)
-		statusLabel.SetText("Starting download...")
-		cancelBtn.Enable()
-		downloadBtn.Disable()
-
-		go func() {
-			defer atomic.StoreInt32(&downloading, 0)
-
-			var lastDownloaded int
-			var lastTime time.Time = time.Now()
-			var smoothedSpeed float64
-
-			updateProgress := func(p ytdlp.ProgressUpdate) {
-				if p.Status != "downloading" {
-					return
-				}
-
-				now := time.Now()
-				elapsed := now.Sub(lastTime).Seconds()
-				var speed float64
-				if elapsed > 0 {
-					speed = float64(p.DownloadedBytes-lastDownloaded) / elapsed
-				}
-
-				// Apply exponential moving average for smoother speed display
-				const alpha = 0.2 // Smoothing factor: 20% weight to new speed
-				if smoothedSpeed == 0 {
-					smoothedSpeed = speed
-				} else {
-					smoothedSpeed = alpha*speed + (1-alpha)*smoothedSpeed
-				}
-				fyne.Do(func() {
-					progressBar.SetValue(p.Percent() / 100)
-
-					// var downloadFinished bool
-
-					// // ---- Detect download completion ----
-					// if p.Percent() >= 100 && p.Status != "downloading" {
-					// 	downloadFinished = true
-					// }
-
-					// // ---- Processing / ffmpeg phase ----
-					// if downloadFinished {
-					// 	statusLabel.SetText("Processing…")
-					// 	speedLabel.SetText("")
-					// 	return
-					// }
-					if p.Percent() >= 100 {
-						statusLabel.SetText("Processing… (merging)")
-						speedLabel.SetText("")
-						return
-					}
-					// ---- Normal downloading ----
-					statusLabel.SetText(fmt.Sprintf("Downloading… %.1f%%", p.Percent()))
-
-					displaySpeed := smoothedSpeed
-					if displaySpeed < 0 {
-						displaySpeed = 0
-					}
-
-					speedLabel.SetText(fmt.Sprintf(
-						"Speed: %s | ETA: %s",
-						formatSpeed(displaySpeed),
-						formatETA(p.ETA()),
-					))
-				})
-
-				lastDownloaded = p.DownloadedBytes
-				lastTime = now
-			}
-
-			var err error
-
-			var format string
-
-			if downloadType.Selected == "Video" {
-				selected := strings.Split(resSelect.Selected, " ")[0]
-				res := strings.TrimSuffix(selected, "p")
-
-				// if selected != "best" {
-				// 	// For specific resolutions, prioritize height over codec to get the selected resolution
-				// 	format = fmt.Sprintf(
-				// 		"bestvideo[height<=%s]+bestaudio/bestvideo[ext=mp4][height<=%s]+bestaudio[ext=m4a]/mp4/best",
-				// 		res, res,
-				// 	)
-				// } else {
-				// 	// For best quality, prioritize reliable codecs for merging
-				// 	format = "bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec^=vp9]+bestaudio/bestvideo[vcodec^=av01]+bestaudio/bestvideo+bestaudio/best"
-				// }
-				if selected != "best" {
-					// format = fmt.Sprintf(
-					// 	"bestvideo[height<=%s][ext=mp4]+bestaudio[ext=m4a]/"+
-					// 		"bestvideo[height<=%s]+bestaudio/best[height<=%s]",
-					// 	res, res, res,
-					// )
-					format = fmt.Sprintf(
-						"bestvideo[height<=%s]+bestaudio/bestvideo[ext=mp4][height<=%s]+bestaudio[ext=m4a]/mp4/best",
-						res, res,
-					)
-				} else {
-					// format = "bestvideo[vcodec^=av01|vcodec^=vp9|vcodec^=avc1]+bestaudio/bestvideo+bestaudio/best"
-					format = "bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec^=vp9]+bestaudio/bestvideo[vcodec^=av01]+bestaudio/bestvideo+bestaudio/best"
-				}
-				_, err = ytdlp.New().
-					Format(format).
-					MergeOutputFormat("mp4").
-					NoKeepVideo().
-					NoKeepFragments().
-					// Output(outputDir+"/%(title)s.%(ext)s").
-					// Output(filepath.Join(outputDir, "%(title)s [%(id)s].%(ext)s")).
-					Output(filepath.Join(outputDir, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
-					ProgressFunc(200*time.Millisecond, updateProgress).
-					Run(ctx, url)
-
-			} else {
-				_, err = ytdlp.New().
-					ExtractAudio().
-					AudioFormat(audioSelect.Selected).
-					// Output(outputDir+"/%(title)s.%(ext)s").
-					// Output(filepath.Join(outputDir, "%(title)s [%(id)s].%(ext)s")).
-					Output(filepath.Join(outputDir, "%(title)s [%(id)s].%(ext)s")).
-					ProgressFunc(200*time.Millisecond, updateProgress).
-					Run(ctx, url)
-			}
-
-			fyne.Do(func() {
-				cancelBtn.Disable()
-				downloadBtn.Enable()
-				speedLabel.SetText("")
-
-				if err != nil {
-					if ctx.Err() == context.Canceled {
-						statusLabel.SetText("Download canceled")
-					} else {
-						log.Println(err)
-						statusLabel.SetText("Download failed")
-					}
-					progressBar.SetValue(0)
-				} else {
-					progressBar.SetValue(1)
-					statusLabel.SetText("Download completed ✓")
-				}
-			})
-		}()
-	}
-
-	cancelBtn.OnTapped = func() {
-		if cancelFunc != nil {
-			cancelFunc()
+		urlEntry.SetText("")
+		titleLabel.SetText("")
+		resSelect.Disable()
+		addBtn.Disable()
+		statusLabel.SetText("Added to queue")
+		if tabs != nil {
+			tabs.SelectIndex(1)
 		}
 	}
+
+	downloadsContainer := container.NewVBox()
+	downloadsScroll := container.NewVScroll(downloadsContainer)
+
+	go worker(downloadsContainer, &outputDir)
 
 	/* -------------------- Layout -------------------- */
 
 	content := container.NewVBox(
-		// widget.NewLabel("YouTube URL"),
-		headerContainer,
-		// urlEntry,
 		urlInputContainer,
 		titleLabel,
 		downloadType,
 		container.NewGridWithColumns(2, resSelect, audioSelect),
-		// resSelect,
-		// audioSelect,
 		widget.NewSeparator(),
 		outputDirLabel,
 		changeDirBtn,
-		container.NewHBox(downloadBtn, cancelBtn),
+		addBtn,
 		statusLabel,
-		speedLabel,
-		progressBar,
 	)
 
-	w.SetContent(container.NewScroll(content))
+	tabs = container.NewAppTabs(
+		container.NewTabItemWithIcon("New Download", theme.DownloadIcon(), container.NewVScroll(content)),
+		container.NewTabItemWithIcon("Queue", theme.ListIcon(), downloadsScroll),
+	)
+
+	mainLayout := container.NewBorder(headerContainer, nil, nil, nil, tabs)
+	w.SetContent(mainLayout)
 	w.ShowAndRun()
 }
 
@@ -491,27 +742,43 @@ func fetchVideoInfo(
 	downloadBtn *widget.Button,
 	fetching *int32,
 ) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
 
+	// Check context before starting
+	if ctx.Err() != nil {
+		fyne.Do(func() {
+			atomic.StoreInt32(fetching, 0)
+			statusLabel.SetText("Request timeout")
+		})
+		return
+	}
+
 	result, err := ytdlp.New().DumpJSON().Run(ctx, url)
-	// result, err := ytdlp.New().DumpJSON().NoCacheDir().Run(ctx, url)
 
 	fyne.Do(func() {
 		defer atomic.StoreInt32(fetching, 0)
 
 		if err != nil {
-			statusLabel.SetText("Failed to fetch info")
+			if ctx.Err() == context.DeadlineExceeded {
+				statusLabel.SetText("Request timeout - try again")
+			} else {
+				statusLabel.SetText("Failed to fetch info")
+			}
 			return
 		}
 
 		var info struct {
-			Title   string `json:"title"`
-			Formats []struct {
+			Title    string `json:"title"`
+			Duration int    `json:"duration"`
+			Formats  []struct {
 				Height         *int   `json:"height"`
+				Width          *int   `json:"width"`
 				Filesize       *int64 `json:"filesize"`
 				FilesizeApprox *int64 `json:"filesize_approx"`
 				Vcodec         string `json:"vcodec"`
+				Acodec         string `json:"acodec"`
+				Ext            string `json:"ext"`
 			} `json:"formats"`
 		}
 
@@ -519,19 +786,41 @@ func fetchVideoInfo(
 			statusLabel.SetText("Failed to parse info")
 			return
 		}
+
+		if info.Title == "" {
+			statusLabel.SetText("No video found at URL")
+			return
+		}
+
 		titleLabel.SetText("Title : " + info.Title)
+
+		// Build resolution map with better size detection
 		resMap := make(map[string]string)
 		for _, f := range info.Formats {
-			if f.Vcodec != "none" && f.Height != nil {
+			// Only include video formats (has video codec and height)
+			if f.Vcodec != "none" && f.Height != nil && *f.Height > 0 {
 				res := fmt.Sprintf("%dp", *f.Height)
-				if f.Filesize != nil {
-					resMap[res] = formatBytes(float64(*f.Filesize))
-				} else if f.FilesizeApprox != nil {
-					resMap[res] = "~" + formatBytes(float64(*f.FilesizeApprox))
+
+				// Get the best size estimate available
+				var size int64 = 0
+				if f.Filesize != nil && *f.Filesize > 0 {
+					size = *f.Filesize
+				} else if f.FilesizeApprox != nil && *f.FilesizeApprox > 0 {
+					size = *f.FilesizeApprox
 				}
+
+				// Keep the largest size for each resolution (worst case estimate)
+				if size > 0 {
+					existingSize := parseSizeString(resMap[res])
+					if size > existingSize {
+						resMap[res] = formatBytes(float64(size))
+					}
+				}
+
 			}
 		}
 
+		// Build options with available resolutions
 		opts := []string{}
 		for _, r := range resolutions {
 			size := "Unknown"
@@ -542,9 +831,35 @@ func fetchVideoInfo(
 		}
 
 		resSelect.Options = opts
-		resSelect.SetSelected(opts[0])
-		resSelect.Enable()
-		downloadBtn.Enable()
-		statusLabel.SetText("Ready to download")
+		if len(opts) > 0 {
+			// Check if current selection is still valid in new options
+			currentSelection := resSelect.Selected
+			selectionValid := false
+			for _, opt := range opts {
+				if opt == currentSelection {
+					selectionValid = true
+					break
+				}
+			}
+
+			// Only auto-select if current selection is empty or invalid
+			if !selectionValid || currentSelection == "" {
+				// Select best available quality by default (prefer 1080p, then 720p, then first)
+				selectedIdx := 0
+				for i, opt := range opts {
+					if strings.Contains(opt, "1080p") || strings.Contains(opt, "720p") {
+						selectedIdx = i
+						break
+					}
+				}
+				resSelect.SetSelected(opts[selectedIdx])
+			}
+			resSelect.Enable()
+			downloadBtn.Enable()
+			statusLabel.SetText("Ready to download")
+		} else {
+			statusLabel.SetText("No video formats found")
+		}
+
 	})
 }
