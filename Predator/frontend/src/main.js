@@ -497,10 +497,18 @@ function createHistoryItem(item) {
                 <span>${date}</span>
             </div>
         </div>
-        <button class="history-item-folder-btn" title="Open folder" onclick="openHistoryFolder('${escapeHtml(item.filePath)}')">
+        <button class="history-item-folder-btn" title="Open folder" data-file-path="${escapeHtml(item.filePath)}">
             📁
         </button>
     `;
+
+    const folderButton = div.querySelector('.history-item-folder-btn');
+    if (folderButton) {
+        folderButton.addEventListener('click', () => {
+            // Use the original, unescaped file path when opening the folder
+            openHistoryFolder(item.filePath);
+        });
+    }
     
     return div;
 }
@@ -508,15 +516,8 @@ function createHistoryItem(item) {
 // Open History Folder
 window.openHistoryFolder = async function(path) {
     try {
-        // Decode HTML entities that might have been encoded by escapeHtml
-        const decodedPath = path.replace(/&amp;/g, '&')
-                               .replace(/</g, '<')
-                               .replace(/>/g, '>')
-                               .replace(/"/g, '"')
-                               .replace(/&#039;/g, "'");
-        
-        console.log('Opening folder:', decodedPath);
-        await OpenFolder(decodedPath);
+        console.log('Opening folder:', path);
+        await OpenFolder(path);
     } catch (err) {
         console.error('Failed to open folder:', err);
         showFileNotFoundModal('The file or folder could not be found. It may have been moved or deleted.');
