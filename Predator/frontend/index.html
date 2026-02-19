@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>Predator</title>
+    <link rel="stylesheet" href="./src/style.css">
+    <link rel="stylesheet" href="./src/app.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <h1 class="title">Predator</h1>
+            <button id="theme-toggle" class="theme-btn" title="Toggle theme">
+                <img id="theme-icon" src="./src/assets/images/summer.png" alt="Theme" width="24" height="24">
+            </button>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Tabs -->
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="new-download">
+                    <span><svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960" width="24px" fill="#e3e3e3"><path d="M480-320 280-520l56-58 104 104v-326h80v326l104-104 56 58-200 200ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z"/></svg></span> New Download
+                </button>
+                <button class="tab-btn" data-tab="history">
+                    <span><svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960" width="24px" fill="#e3e3e3"><path d="M480-120q-138 0-240.5-91.5T122-440h82q14 104 92.5 172T480-200q117 0 198.5-81.5T760-480q0-117-81.5-198.5T480-760q-69 0-129 32t-101 88h110v80H120v-240h80v94q51-64 124.5-99T480-840q75 0 140.5 28.5t114 77q48.5 48.5 77 114T840-480q0 75-28.5 140.5t-77 114q-48.5 48.5-114 77T480-120Zm112-192L440-464v-216h80v184l128 128-56 56Z"/></svg></span> History
+                </button>
+            </div>
+
+            <!-- New Download Tab -->
+            <div id="new-download" class="tab-content active">
+                <!-- URL Input -->
+                <div class="input-group">
+                    <div class="url-input-wrapper">
+                        <input type="text" id="url-input" placeholder="Paste YouTube URL here" autocomplete="off">
+                        <button id="clear-btn" class="clear-btn" title="Clear">✕</button>
+                    </div>
+                </div>
+
+                <!-- Video Title -->
+                <div id="title-display" class="title-display hidden"></div>
+
+                <!-- Format Selection with Download Type -->
+                <div class="format-selection">
+                    <div class="select-wrapper">
+                        <label>Type</label>
+                        <div class="download-type">
+                            <label class="radio-label">
+                                <input type="radio" name="download-type" value="Video" checked>
+                                <span>Video</span>
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="download-type" value="Audio">
+                                <span>Audio</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="select-wrapper" id="resolution-wrapper">
+                        <label>Resolution</label>
+                        <select id="resolution-select" disabled>
+                            <option value="">Select resolution...</option>
+                        </select>
+                    </div>
+                    <div class="select-wrapper hidden" id="audio-format-wrapper">
+                        <label>Audio Format</label>
+                        <select id="audio-format-select">
+                            <option value="mp3" selected>MP3</option>
+                            <option value="m4a">M4A</option>
+                            <option value="opus">Opus</option>
+                            <option value="wav">WAV</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Output Directory -->
+                <div class="output-section">
+                    <div id="output-dir-display" class="output-dir">Download location not set</div>
+                    <button id="change-dir-btn" class="secondary-btn">Change Download Location</button>
+                </div>
+
+                <!-- Download Button -->
+                <button id="add-btn" class="primary-btn" disabled>Download</button>
+
+                <!-- Status -->
+                <div id="status-label" class="status">Ready</div>
+            </div>
+
+            <!-- History Tab -->
+            <div id="history" class="tab-content">
+                <!-- History Filters -->
+            <div class="history-filters">
+                <button class="filter-btn active" data-filter="all">All</button>
+                <button class="filter-btn" data-filter="Video">Video</button>
+                <button class="filter-btn" data-filter="Audio">Audio</button>
+                <button class="clear-history-btn" id="clear-history-btn">Clear History</button>
+            </div>
+
+                <!-- Active Downloads Section -->
+                <div class="history-section">
+                    <h3 class="history-section-title">Active Downloads</h3>
+                    <div id="downloads-container" class="downloads-container">
+                        <div class="empty-state">No active downloads</div>
+                    </div>
+                </div>
+                <!-- Download History Section -->
+                <div class="history-section">
+                    <h3 class="history-section-title">Completed Downloads</h3>
+                    <div id="history-container" class="history-container">
+                        <div class="empty-state">No download history yet</div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Clear History Confirmation Modal -->
+    <div id="clear-history-modal" class="modal-overlay">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title">Clear History</h3>
+                <button class="modal-close" id="modal-close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p>Are you sure you want to clear all download history?</p>
+                <p class="modal-warning">This action cannot be undone.</p>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn modal-btn-secondary" id="modal-cancel-btn">Cancel</button>
+                <button class="modal-btn modal-btn-danger" id="modal-confirm-btn">Clear History</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- File Not Found Modal -->
+    <div id="file-not-found-modal" class="modal-overlay">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title">File Not Found</h3>
+                <button class="modal-close" id="file-not-found-close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p id="file-not-found-message">The downloaded file could not be found.</p>
+                <p class="modal-warning">It may have been moved or deleted.</p>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn modal-btn-secondary" id="file-not-found-ok-btn">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="./src/main.js" type="module"></script>
+</body>
+</html>
