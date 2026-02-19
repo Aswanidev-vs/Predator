@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 # Predator
 
 
@@ -240,4 +240,4 @@ Contributions are welcome! Feel free to submit issues and pull requests.
 
 
 **Note**: This application requires an active internet connection to download from YouTube and relies on the yt-dlp project to function.
->>>>>>> 5c9da659bc26ab9faf682fb549dc7e0b599a7169
+
