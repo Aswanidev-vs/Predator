@@ -47,3 +47,5 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 )
+
+// replace github.com/wailsapp/wails/v2 v2.11.0 => C:\Users\LENOVO\go\pkg\mod
