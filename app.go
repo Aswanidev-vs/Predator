@@ -1150,21 +1150,21 @@ func extractVideoID(url string) string {
 	}
 
 	// Try to extract from instagram.com/p/SHORTCODE
-	re4 := regexp.MustCompile(`instagram\.com/p/([a-zA-Z0-9_-]+)`)
-	if matches := re4.FindStringSubmatch(url); len(matches) > 1 {
-		return "ig_" + matches[1]
+	re4 := regexp.MustCompile(`^https?://(www\.)?instagram\.com/p/([a-zA-Z0-9_-]+)`)
+	if matches := re4.FindStringSubmatch(url); len(matches) > 2 {
+		return "ig_" + matches[2]
 	}
 
 	// Try to extract from instagram.com/reel/SHORTCODE
-	re5 := regexp.MustCompile(`instagram\.com/reel/([a-zA-Z0-9_-]+)`)
-	if matches := re5.FindStringSubmatch(url); len(matches) > 1 {
-		return "ig_" + matches[1]
+	re5 := regexp.MustCompile(`^https?://(www\.)?instagram\.com/reel/([a-zA-Z0-9_-]+)`)
+	if matches := re5.FindStringSubmatch(url); len(matches) > 2 {
+		return "ig_" + matches[2]
 	}
 
 	// Try to extract from instagram.com/reels/SHORTCODE
-	re6 := regexp.MustCompile(`instagram\.com/reels/([a-zA-Z0-9_-]+)`)
-	if matches := re6.FindStringSubmatch(url); len(matches) > 1 {
-		return "ig_" + matches[1]
+	re6 := regexp.MustCompile(`^https?://(www\.)?instagram\.com/reels/([a-zA-Z0-9_-]+)`)
+	if matches := re6.FindStringSubmatch(url); len(matches) > 2 {
+		return "ig_" + matches[2]
 	}
 
 	return ""
