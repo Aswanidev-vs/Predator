@@ -923,12 +923,20 @@ func (a *App) extractFFmpeg(zipPath, destDir string) error {
 				continue
 			}
 
+			// Derive a safe base name from the archive entry and validate it
+			baseName := filepath.Base(f.Name)
+			if baseName == "" || baseName == "." || baseName == ".." || strings.Contains(baseName, "..") ||
+				strings.Contains(baseName, string(os.PathSeparator)) || strings.Contains(baseName, "/") {
+				// Skip potentially unsafe or malicious paths
+				continue
+			}
+
 			rc, err := f.Open()
 			if err != nil {
 				return err
 			}
 
-			destPath := filepath.Join(destDir, filepath.Base(f.Name))
+			destPath := filepath.Join(destDir, baseName)
 			out, err := os.Create(destPath)
 			if err != nil {
 				rc.Close()
