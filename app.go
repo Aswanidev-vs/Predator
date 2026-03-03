@@ -70,17 +70,17 @@ type DownloadTask struct {
 
 type VideoInfo struct {
 	Title       string   `json:"title"`
-	Duration    int      `json:"duration"`
+	Duration    float64  `json:"duration"`
 	Resolutions []string `json:"resolutions"`
 	IsPlaylist  bool     `json:"isPlaylist"`
 	PlaylistID  string   `json:"playlistId,omitempty"`
 }
 
 type PlaylistVideo struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Duration int    `json:"duration"`
-	URL      string `json:"url"`
+	ID       string  `json:"id"`
+	Title    string  `json:"title"`
+	Duration float64 `json:"duration"`
+	URL      string  `json:"url"`
 }
 
 type PlaylistInfo struct {
@@ -112,6 +112,13 @@ type DownloadHistory struct {
 	Status       string    `json:"status"`
 }
 
+// Settings represents the application settings
+type Settings struct {
+	Theme      string `json:"theme"`
+	OutputDir  string `json:"outputDir"`
+	AutoUpdate bool   `json:"autoUpdate"`
+}
+
 /* -------------------- URL Validation -------------------- */
 
 var youtubeURLPatterns = []*regexp.Regexp{
@@ -120,6 +127,14 @@ var youtubeURLPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^(https?://)?(www\.)?youtu\.be/[\w-]+`),
 	regexp.MustCompile(`^(https?://)?(www\.)?youtube\.com/shorts/[\w-]+`),
 	regexp.MustCompile(`^(https?://)?(www\.)?youtube\.com/live/[\w-]+`),
+}
+
+var instagramURLPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^(https?://)?(www\.)?instagram\.com/p/[\w-]+`),
+	regexp.MustCompile(`^(https?://)?(www\.)?instagram\.com/reel/[\w-]+`),
+	regexp.MustCompile(`^(https?://)?(www\.)?instagram\.com/reels/[\w-]+`),
+	regexp.MustCompile(`^(https?://)?(www\.)?instagram\.com/tv/[\w-]+`),
+	regexp.MustCompile(`^(https?://)?(www\.)?instagram\.com/stories/[\w-]+`),
 }
 
 func (a *App) IsValidYouTubeURL(url string) bool {
@@ -131,11 +146,30 @@ func (a *App) IsValidYouTubeURL(url string) bool {
 	return false
 }
 
+func (a *App) IsValidInstagramURL(url string) bool {
+	for _, pattern := range instagramURLPatterns {
+		if pattern.MatchString(url) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsValidURL checks if URL is valid for YouTube or Instagram
+func (a *App) IsValidURL(url string) bool {
+	return a.IsValidYouTubeURL(url) || a.IsValidInstagramURL(url)
+}
+
 // IsPlaylistURL checks if the URL is a YouTube playlist
 func (a *App) IsPlaylistURL(url string) bool {
 	// Check for playlist parameter in URL
 	playlistPattern := regexp.MustCompile(`[?&]list=([a-zA-Z0-9_-]+)`)
 	return playlistPattern.MatchString(url)
+}
+
+// IsInstagramURL checks if the URL is an Instagram URL
+func (a *App) IsInstagramURL(url string) bool {
+	return a.IsValidInstagramURL(url)
 }
 
 // FetchPlaylistInfo fetches all videos from a playlist
@@ -176,9 +210,9 @@ func (a *App) FetchPlaylistInfo(url string) (*PlaylistInfo, error) {
 				Title   string `json:"title"`
 				ID      string `json:"id"`
 				Entries []struct {
-					ID       string `json:"id"`
-					Title    string `json:"title"`
-					Duration int    `json:"duration"`
+					ID       string  `json:"id"`
+					Title    string  `json:"title"`
+					Duration float64 `json:"duration"`
 				} `json:"entries"`
 			}
 
@@ -210,11 +244,11 @@ func (a *App) FetchPlaylistInfo(url string) (*PlaylistInfo, error) {
 
 		// Subsequent lines are individual videos (flat playlist format)
 		var entry struct {
-			ID            string `json:"id"`
-			Title         string `json:"title"`
-			Duration      int    `json:"duration"`
-			PlaylistID    string `json:"playlist_id"`
-			PlaylistTitle string `json:"playlist_title"`
+			ID            string  `json:"id"`
+			Title         string  `json:"title"`
+			Duration      float64 `json:"duration"`
+			PlaylistID    string  `json:"playlist_id"`
+			PlaylistTitle string  `json:"playlist_title"`
 		}
 
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
@@ -497,7 +531,87 @@ func (a *App) getHistoryFilePath() string {
 	return filepath.Join(historyDir, "history.json")
 }
 
+func (a *App) getSettingsFilePath() string {
+	homeDir, _ := os.UserHomeDir()
+	settingsDir := filepath.Join(homeDir, ".predator")
+	os.MkdirAll(settingsDir, 0755)
+	return filepath.Join(settingsDir, "settings.json")
+}
+
+// GetSettings returns the current application settings
+func (a *App) GetSettings() (*Settings, error) {
+	settingsFile := a.getSettingsFilePath()
+	data, err := os.ReadFile(settingsFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Return default settings if file doesn't exist
+			return a.GetDefaultSettings(), nil
+		}
+		return nil, err
+	}
+
+	var settings Settings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return nil, err
+	}
+
+	return &settings, nil
+}
+
+// SaveSettings saves the application settings to file
+func (a *App) SaveSettings(settings Settings) error {
+	settingsFile := a.getSettingsFilePath()
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(settingsFile, data, 0644)
+}
+
+// GetDefaultSettings returns the default application settings
+func (a *App) GetDefaultSettings() *Settings {
+	return &Settings{
+		Theme:      "dark",
+		OutputDir:  "",
+		AutoUpdate: true,
+	}
+}
+
+// CheckDuplicate checks if a video has already been downloaded
+func (a *App) CheckDuplicate(videoID string) (map[string]interface{}, error) {
+	history, err := a.GetDownloadHistory()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, item := range history {
+		// Extract video ID from the URL
+		itemVideoID := extractVideoID(item.URL)
+		if itemVideoID == videoID {
+			return map[string]interface{}{
+				"isDuplicate":  true,
+				"existingItem": item,
+			}, nil
+		}
+	}
+
+	return map[string]interface{}{
+		"isDuplicate":  false,
+		"existingItem": nil,
+	}, nil
+}
+
+// ShowNotification displays a system notification
+func (a *App) ShowNotification(title, message string) error {
+	wailsRuntime.EventsEmit(a.ctx, "notification", map[string]string{
+		"title":   title,
+		"message": message,
+	})
+	return nil
+}
+
 // GetDownloadHistory returns all download history
+
 func (a *App) GetDownloadHistory() ([]DownloadHistory, error) {
 	historyMu.RLock()
 	defer historyMu.RUnlock()
@@ -559,47 +673,109 @@ func (a *App) SaveToHistory(item DownloadHistory) error {
 func (a *App) OpenFolder(path string) error {
 	log.Printf("OpenFolder called with path: %s", path)
 
-	// Clean the path
-	path = filepath.Clean(path)
-	log.Printf("Cleaned path: %s", path)
-
-	// Check if path exists
-	info, err := os.Stat(path)
-	if err != nil {
-		log.Printf("Path does not exist: %v", err)
-		return fmt.Errorf("path does not exist: %s", path)
+	// If path is empty, return error
+	if path == "" {
+		return fmt.Errorf("path is empty")
 	}
 
-	log.Printf("Path exists, isDir: %v", info.IsDir())
+	// Check if the path exists as-is first
+	info, err := os.Stat(path)
+	if err == nil {
+		// Path exists, determine if it's a file or directory
+		if info.IsDir() {
+			// It's a directory, just open it
+			log.Printf("Opening directory: %s", path)
+			return a.openDirectory(path)
+		}
+		// It's a file, open the containing folder and select the file
+		log.Printf("Opening file with /select,: %s", path)
+		return a.openDirectoryWithSelect(path)
+	}
 
+	// Path might be relative or might not exist anymore
+	// Try to get absolute path
+	absPath, absErr := filepath.Abs(path)
+	if absErr != nil {
+		log.Printf("Failed to get absolute path: %v", absErr)
+		// Try opening the parent directory anyway
+		dir := filepath.Dir(path)
+		log.Printf("Trying to open parent directory: %s", dir)
+		return a.openDirectory(dir)
+	}
+
+	log.Printf("Absolute path: %s", absPath)
+
+	// Check if absolute path exists
+	info, err = os.Stat(absPath)
+	if err != nil {
+		log.Printf("Absolute path does not exist: %v", err)
+		// File might have been deleted, try to open the directory anyway
+		dir := filepath.Dir(absPath)
+		log.Printf("Trying to open directory: %s", dir)
+		// Check if directory exists
+		if _, dirErr := os.Stat(dir); dirErr != nil {
+			return fmt.Errorf("neither file nor directory exists: %s (tried: %s)", path, absPath)
+		}
+		return a.openDirectory(dir)
+	}
+
+	if info.IsDir() {
+		log.Printf("Opening absolute directory: %s", absPath)
+		return a.openDirectory(absPath)
+	}
+
+	log.Printf("Opening absolute file with /select,: %s", absPath)
+	return a.openDirectoryWithSelect(absPath)
+}
+
+// openDirectory opens a directory using the system file explorer
+func (a *App) openDirectory(dirPath string) error {
 	var cmd *exec.Cmd
 
 	switch runtime.GOOS {
 	case "windows":
-		// Use full path to explorer.exe to avoid PATH issues
 		explorerPath := `C:\Windows\explorer.exe`
-		// If path is a file, use /select, to highlight it
-		// If path is a directory, just open it
-		if info.IsDir() {
-			log.Printf("Opening directory: %s", path)
-			cmd = exec.Command(explorerPath, path)
-		} else {
-			// /select, opens the folder and highlights the file
-			log.Printf("Opening file with /select,: %s", path)
-			cmd = exec.Command(explorerPath, "/select,", path)
-		}
+		cmd = exec.Command(explorerPath, filepath.Clean(dirPath))
 	case "darwin":
-		cmd = exec.Command("open", path)
+		cmd = exec.Command("open", filepath.Clean(dirPath))
 	default: // linux
-		cmd = exec.Command("xdg-open", filepath.Dir(path))
+		cmd = exec.Command("xdg-open", filepath.Clean(dirPath))
 	}
 
-	log.Printf("Executing command: %v", cmd)
+	log.Printf("Executing directory command: %v", cmd)
+	return cmd.Start()
+}
+
+// openDirectoryWithSelect opens a directory and selects/highlights the specific file
+func (a *App) openDirectoryWithSelect(filePath string) error {
+	var cmd *exec.Cmd
+
+	// Ensure we have an absolute path for the file
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		absPath = filePath
+	}
+
+	switch runtime.GOOS {
+	case "windows":
+		// /select, opens the folder and highlights the file
+		explorerPath := `C:\Windows\explorer.exe`
+		cmd = exec.Command(explorerPath, "/select,", absPath)
+	case "darwin":
+		// -R flag reveals (selects) the file in Finder
+		cmd = exec.Command("open", "-R", absPath)
+	default: // linux
+		// For linux, just open the parent directory
+		cmd = exec.Command("xdg-open", filepath.Dir(absPath))
+	}
+
+	log.Printf("Executing select command: %v", cmd)
 	return cmd.Start()
 }
 
 // ClearHistory clears all download history
 func (a *App) ClearHistory() error {
+
 	historyMu.Lock()
 	defer historyMu.Unlock()
 
@@ -809,18 +985,20 @@ func (a *App) extractFFmpeg(zipPath, destDir string) error {
 				continue
 			}
 
+			// Derive a safe base name from the archive entry and validate it
+			baseName := filepath.Base(f.Name)
+			if baseName == "" || baseName == "." || baseName == ".." || strings.Contains(baseName, "..") ||
+				strings.Contains(baseName, string(os.PathSeparator)) || strings.Contains(baseName, "/") {
+				// Skip potentially unsafe or malicious paths
+				continue
+			}
+
 			rc, err := f.Open()
 			if err != nil {
 				return err
 			}
 
-			// Validate archive entry name to prevent directory traversal / Zip Slip
-			if strings.Contains(f.Name, "..") || filepath.IsAbs(f.Name) {
-				rc.Close()
-				continue
-			}
-
-			destPath := filepath.Join(destDir, filepath.Base(f.Name))
+			destPath := filepath.Join(destDir, baseName)
 			out, err := os.Create(destPath)
 			if err != nil {
 				rc.Close()
@@ -928,8 +1106,8 @@ func (a *App) FetchVideoInfo(url string) (*VideoInfo, error) {
 	}
 
 	var info struct {
-		Title    string `json:"title"`
-		Duration int    `json:"duration"`
+		Title    string  `json:"title"`
+		Duration float64 `json:"duration"`
 		Formats  []struct {
 			Height         *int   `json:"height"`
 			Width          *int   `json:"width"`
@@ -1021,7 +1199,7 @@ func (a *App) AddToQueue(task DownloadTask) (string, error) {
 	return taskID, nil
 }
 
-// extractVideoID extracts the video ID from a YouTube URL
+// extractVideoID extracts the video ID from a YouTube or Instagram URL
 func extractVideoID(url string) string {
 	// Try to extract from youtube.com/watch?v=ID
 	re1 := regexp.MustCompile(`[?&]v=([a-zA-Z0-9_-]{11})`)
@@ -1039,6 +1217,24 @@ func extractVideoID(url string) string {
 	re3 := regexp.MustCompile(`youtube\.com/shorts/([a-zA-Z0-9_-]{11})`)
 	if matches := re3.FindStringSubmatch(url); len(matches) > 1 {
 		return matches[1]
+	}
+
+	// Try to extract from instagram.com/p/SHORTCODE
+	re4 := regexp.MustCompile(`^https?://(www\.)?instagram\.com/p/([a-zA-Z0-9_-]+)`)
+	if matches := re4.FindStringSubmatch(url); len(matches) > 2 {
+		return "ig_" + matches[2]
+	}
+
+	// Try to extract from instagram.com/reel/SHORTCODE
+	re5 := regexp.MustCompile(`^https?://(www\.)?instagram\.com/reel/([a-zA-Z0-9_-]+)`)
+	if matches := re5.FindStringSubmatch(url); len(matches) > 2 {
+		return "ig_" + matches[2]
+	}
+
+	// Try to extract from instagram.com/reels/SHORTCODE
+	re6 := regexp.MustCompile(`^https?://(www\.)?instagram\.com/reels/([a-zA-Z0-9_-]+)`)
+	if matches := re6.FindStringSubmatch(url); len(matches) > 2 {
+		return "ig_" + matches[2]
 	}
 
 	return ""
