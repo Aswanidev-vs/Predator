@@ -673,109 +673,47 @@ func (a *App) SaveToHistory(item DownloadHistory) error {
 func (a *App) OpenFolder(path string) error {
 	log.Printf("OpenFolder called with path: %s", path)
 
-	// If path is empty, return error
-	if path == "" {
-		return fmt.Errorf("path is empty")
-	}
+	// Clean the path
+	path = filepath.Clean(path)
+	log.Printf("Cleaned path: %s", path)
 
-	// Check if the path exists as-is first
+	// Check if path exists
 	info, err := os.Stat(path)
-	if err == nil {
-		// Path exists, determine if it's a file or directory
+	if err != nil {
+		log.Printf("Path does not exist: %v", err)
+		return fmt.Errorf("path does not exist: %s", path)
+	}
+
+	log.Printf("Path exists, isDir: %v", info.IsDir())
+
+	var cmd *exec.Cmd
+
+	switch runtime.GOOS {
+	case "windows":
+		// Use full path to explorer.exe to avoid PATH issues
+		explorerPath := `C:\Windows\explorer.exe`
+		// If path is a file, use /select, to highlight it
+		// If path is a directory, just open it
 		if info.IsDir() {
-			// It's a directory, just open it
 			log.Printf("Opening directory: %s", path)
-			return a.openDirectory(path)
+			cmd = exec.Command(explorerPath, path)
+		} else {
+			// /select, opens the folder and highlights the file
+			log.Printf("Opening file with /select,: %s", path)
+			cmd = exec.Command(explorerPath, "/select,", path)
 		}
-		// It's a file, open the containing folder and select the file
-		log.Printf("Opening file with /select,: %s", path)
-		return a.openDirectoryWithSelect(path)
-	}
-
-	// Path might be relative or might not exist anymore
-	// Try to get absolute path
-	absPath, absErr := filepath.Abs(path)
-	if absErr != nil {
-		log.Printf("Failed to get absolute path: %v", absErr)
-		// Try opening the parent directory anyway
-		dir := filepath.Dir(path)
-		log.Printf("Trying to open parent directory: %s", dir)
-		return a.openDirectory(dir)
-	}
-
-	log.Printf("Absolute path: %s", absPath)
-
-	// Check if absolute path exists
-	info, err = os.Stat(absPath)
-	if err != nil {
-		log.Printf("Absolute path does not exist: %v", err)
-		// File might have been deleted, try to open the directory anyway
-		dir := filepath.Dir(absPath)
-		log.Printf("Trying to open directory: %s", dir)
-		// Check if directory exists
-		if _, dirErr := os.Stat(dir); dirErr != nil {
-			return fmt.Errorf("neither file nor directory exists: %s (tried: %s)", path, absPath)
-		}
-		return a.openDirectory(dir)
-	}
-
-	if info.IsDir() {
-		log.Printf("Opening absolute directory: %s", absPath)
-		return a.openDirectory(absPath)
-	}
-
-	log.Printf("Opening absolute file with /select,: %s", absPath)
-	return a.openDirectoryWithSelect(absPath)
-}
-
-// openDirectory opens a directory using the system file explorer
-func (a *App) openDirectory(dirPath string) error {
-	var cmd *exec.Cmd
-
-	switch runtime.GOOS {
-	case "windows":
-		explorerPath := `C:\Windows\explorer.exe`
-		cmd = exec.Command(explorerPath, filepath.Clean(dirPath))
 	case "darwin":
-		cmd = exec.Command("open", filepath.Clean(dirPath))
+		cmd = exec.Command("open", path)
 	default: // linux
-		cmd = exec.Command("xdg-open", filepath.Clean(dirPath))
+		cmd = exec.Command("xdg-open", filepath.Dir(path))
 	}
 
-	log.Printf("Executing directory command: %v", cmd)
-	return cmd.Start()
-}
-
-// openDirectoryWithSelect opens a directory and selects/highlights the specific file
-func (a *App) openDirectoryWithSelect(filePath string) error {
-	var cmd *exec.Cmd
-
-	// Ensure we have an absolute path for the file
-	absPath, err := filepath.Abs(filePath)
-	if err != nil {
-		absPath = filePath
-	}
-
-	switch runtime.GOOS {
-	case "windows":
-		// /select, opens the folder and highlights the file
-		explorerPath := `C:\Windows\explorer.exe`
-		cmd = exec.Command(explorerPath, "/select,", absPath)
-	case "darwin":
-		// -R flag reveals (selects) the file in Finder
-		cmd = exec.Command("open", "-R", absPath)
-	default: // linux
-		// For linux, just open the parent directory
-		cmd = exec.Command("xdg-open", filepath.Dir(absPath))
-	}
-
-	log.Printf("Executing select command: %v", cmd)
+	log.Printf("Executing command: %v", cmd)
 	return cmd.Start()
 }
 
 // ClearHistory clears all download history
 func (a *App) ClearHistory() error {
-
 	historyMu.Lock()
 	defer historyMu.Unlock()
 
