@@ -7,12 +7,8 @@ module predator
 go 1.25.0
 
 require (
-<<<<<<< HEAD
-	github.com/lrstanley/go-ytdlp v1.3.2
-=======
 
 	github.com/lrstanley/go-ytdlp v1.3.0
->>>>>>> d9ff223bd88c6ebe9484411f513d5b5c9516a5f0
 	github.com/wailsapp/wails/v2 v2.11.0
 )
 
