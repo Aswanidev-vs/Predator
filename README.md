@@ -5,10 +5,8 @@
 </p>
 
 <p align="center">
-<a href="https://github.com/Aswanidev-vs/Predator/stargazers"><img src="https://img.shields.io/github/stars/Aswanidev-vs/Predator?style=flat&color=green" alt="Stars"></a>
+
 <a href="https://github.com/Aswanidev-vs/Predator/releases"><img src="https://img.shields.io/github/v/release/Aswanidev-vs/Predator?color=blue&include_prereleases&label=latest" alt="Release"></a>
-<a href="https://github.com/Aswanidev-vs/Predator/releases"><img src="https://img.shields.io/github/downloads/Aswanidev-vs/Predator/total?color=orange" alt="Downloads"></a>
-<a href="https://github.com/Aswanidev-vs/Predator/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Aswanidev-vs/Predator?color=yellow" alt="License"></a>
 </p>
 
 A simple desktop app for grabbing videos and audio from YouTube and Instagram. Built with Go and Wails (web tech frontend), using yt-dlp under the hood to do the heavy lifting.
