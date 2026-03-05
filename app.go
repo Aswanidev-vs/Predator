@@ -412,78 +412,159 @@ func extractResolution(resolution string) string {
 
 /* -------------------- Format Builders -------------------- */
 
+// buildVideoFormatString builds format string for mp4 container with proper codec handling
+// Uses separate video+audio selection to ensure reliable merging
 func buildVideoFormatString(cleanRes string, preferH264 bool) string {
-	// Build format string that handles all codecs (h264, vp9, av1)
-	// CRITICAL: Always use m4a audio for mp4 container compatibility
-	// webm/opus audio causes ffmpeg merge failures with mp4 video
+	// Build format string that prioritizes h264+aac for mp4 container compatibility
+	// Use separate selection (bv*+ba*) to ensure proper download and merging
 
 	if cleanRes == "best" {
-		// Try h264 first, then vp9, then av1
-		// Audio: STRICTLY m4a/aac only to ensure mp4 compatibility
-		return "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/" +
-			"bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/" +
-			"bestvideo[vcodec^=vp9]+bestaudio[ext=m4a]/" +
-			"bestvideo[vcodec^=vp9]+bestaudio[acodec^=mp4a]/" +
-			"bestvideo[vcodec^=av01]+bestaudio[ext=m4a]/" +
-			"bestvideo[vcodec^=av01]+bestaudio[acodec^=mp4a]/" +
-			"bestvideo+bestaudio[ext=m4a]/" +
-			"bestvideo+bestaudio[acodec^=mp4a]/" +
-			"bestvideo+bestaudio/best"
+		// Best quality - prioritize h264 with aac/m4a for reliable mp4 merging
+		return "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/" +
+			"bestvideo[vcodec^=avc1]+bestaudio/" +
+			"bestvideo[vcodec^=vp9]+bestaudio[ext=m4a]/bestvideo[vcodec^=vp9]+bestaudio[acodec^=mp4a]/" +
+			"bestvideo[vcodec^=vp9]+bestaudio/" +
+			"bestvideo[vcodec^=av01]+bestaudio[ext=m4a]/bestvideo[vcodec^=av01]+bestaudio[acodec^=mp4a]/" +
+			"bestvideo[vcodec^=av01]+bestaudio/" +
+			"bestvideo+bestaudio[ext=m4a]/bestvideo+bestaudio[acodec^=mp4a]/bestvideo+bestaudio/best"
 	}
 
 	resNum, _ := strconv.Atoi(cleanRes)
 	if resNum >= 1440 {
-		// High resolutions - try exact height first, then fall back to <=
-		// STRICTLY m4a audio only to prevent ffmpeg merge failures
+		// High resolutions (1440p+) - prioritize h264 with exact or close height match
 		return fmt.Sprintf(
-			// Try exact height match first with m4a audio only
+			// h264 with m4a audio - best for mp4 merging
 			"bestvideo[vcodec^=avc1][height=%s]+bestaudio[ext=m4a]/"+
 				"bestvideo[vcodec^=avc1][height=%s]+bestaudio[acodec^=mp4a]/"+
-				"bestvideo[vcodec^=vp9][height=%s]+bestaudio[ext=m4a]/"+
-				"bestvideo[vcodec^=vp9][height=%s]+bestaudio[acodec^=mp4a]/"+
-				"bestvideo[vcodec^=av01][height=%s]+bestaudio[ext=m4a]/"+
-				"bestvideo[vcodec^=av01][height=%s]+bestaudio[acodec^=mp4a]/"+
-				// Fall back to <= if exact match not available - still m4a only
+				"bestvideo[vcodec^=avc1][height=%s]+bestaudio/"+
+				// h264 with <= height fallback
 				"bestvideo[vcodec^=avc1][height<=%s]+bestaudio[ext=m4a]/"+
 				"bestvideo[vcodec^=avc1][height<=%s]+bestaudio[acodec^=mp4a]/"+
-				"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[ext=m4a]/"+
-				"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[acodec^=mp4a]/"+
-				"bestvideo[vcodec^=av01][height<=%s]+bestaudio[ext=m4a]/"+
-				"bestvideo[vcodec^=av01][height<=%s]+bestaudio[acodec^=mp4a]/"+
-				// Final fallbacks - still prefer m4a
+				"bestvideo[vcodec^=avc1][height<=%s]+bestaudio/"+
+				// vp9 fallback
+				"bestvideo[vcodec^=vp9][height=%s]+bestaudio[ext=m4a]/"+
+				"bestvideo[vcodec^=vp9][height=%s]+bestaudio[acodec^=mp4a]/"+
+				"bestvideo[vcodec^=vp9][height=%s]+bestaudio/"+
+				// av1 fallback
+				"bestvideo[vcodec^=av01][height=%s]+bestaudio[ext=m4a]/"+
+				"bestvideo[vcodec^=av01][height=%s]+bestaudio[acodec^=mp4a]/"+
+				"bestvideo[vcodec^=av01][height=%s]+bestaudio/"+
+				// Any video codec fallback
 				"bestvideo[height<=%s]+bestaudio[ext=m4a]/"+
 				"bestvideo[height<=%s]+bestaudio[acodec^=mp4a]/"+
+				"bestvideo[height<=%s]+bestaudio/"+
 				"best[height<=%s]",
 			cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
 			cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
-			cleanRes, cleanRes, cleanRes,
+			cleanRes, cleanRes, cleanRes, cleanRes,
 		)
 	}
 
-	// Standard resolutions - try exact height first, then fall back
-	// STRICTLY m4a audio only to prevent ffmpeg merge failures
+	// Standard resolutions - prioritize h264 with m4a audio
 	return fmt.Sprintf(
-		// Try exact height match first with m4a audio only
+		// h264 with m4a audio - best for mp4 merging
 		"bestvideo[vcodec^=avc1][height=%s]+bestaudio[ext=m4a]/"+
 			"bestvideo[vcodec^=avc1][height=%s]+bestaudio[acodec^=mp4a]/"+
-			"bestvideo[vcodec^=vp9][height=%s]+bestaudio[ext=m4a]/"+
-			"bestvideo[vcodec^=vp9][height=%s]+bestaudio[acodec^=mp4a]/"+
-			"bestvideo[vcodec^=av01][height=%s]+bestaudio[ext=m4a]/"+
-			"bestvideo[vcodec^=av01][height=%s]+bestaudio[acodec^=mp4a]/"+
-			// Fall back to <= if exact match not available - still m4a only
+			"bestvideo[vcodec^=avc1][height=%s]+bestaudio/"+
+			// h264 with <= height fallback
 			"bestvideo[vcodec^=avc1][height<=%s]+bestaudio[ext=m4a]/"+
 			"bestvideo[vcodec^=avc1][height<=%s]+bestaudio[acodec^=mp4a]/"+
-			"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[ext=m4a]/"+
-			"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[acodec^=mp4a]/"+
-			"bestvideo[vcodec^=av01][height<=%s]+bestaudio[ext=m4a]/"+
-			"bestvideo[vcodec^=av01][height<=%s]+bestaudio[acodec^=mp4a]/"+
-			// Final fallbacks - still prefer m4a
+			"bestvideo[vcodec^=avc1][height<=%s]+bestaudio/"+
+			// vp9 fallback
+			"bestvideo[vcodec^=vp9][height=%s]+bestaudio[ext=m4a]/"+
+			"bestvideo[vcodec^=vp9][height=%s]+bestaudio[acodec^=mp4a]/"+
+			"bestvideo[vcodec^=vp9][height=%s]+bestaudio/"+
+			// av1 fallback
+			"bestvideo[vcodec^=av01][height=%s]+bestaudio[ext=m4a]/"+
+			"bestvideo[vcodec^=av01][height=%s]+bestaudio[acodec^=mp4a]/"+
+			"bestvideo[vcodec^=av01][height=%s]+bestaudio/"+
+			// Any video codec fallback
 			"bestvideo[height<=%s]+bestaudio[ext=m4a]/"+
 			"bestvideo[height<=%s]+bestaudio[acodec^=mp4a]/"+
+			"bestvideo[height<=%s]+bestaudio/"+
 			"best[height<=%s]",
 		cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
 		cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
-		cleanRes, cleanRes, cleanRes,
+		cleanRes, cleanRes, cleanRes, cleanRes,
+	)
+}
+
+// buildWebmFormatString builds format string for webm container with VP9/AV1 + opus
+// This ensures best quality webm output with modern codecs
+func buildWebmFormatString(cleanRes string) string {
+	// For webm, we want VP9 or AV1 video with opus audio
+	// This provides better quality than older vp8/opus combinations
+
+	if cleanRes == "best" {
+		// Best quality webm - prioritize av01 (AV1) then vp9
+		return "bestvideo[vcodec^=av01]+bestaudio[acodec^=opus]/" +
+			"bestvideo[vcodec^=av01]+bestaudio[ext=webm]/" +
+			"bestvideo[vcodec^=av01]+bestaudio/" +
+			"bestvideo[vcodec^=vp9]+bestaudio[acodec^=opus]/" +
+			"bestvideo[vcodec^=vp9]+bestaudio[ext=webm]/" +
+			"bestvideo[vcodec^=vp9]+bestaudio/" +
+			"bestvideo[vcodec^=vp8]+bestaudio[acodec^=opus]/" +
+			"bestvideo[vcodec^=vp8]+bestaudio/" +
+			"bestvideo+bestaudio[acodec^=opus]/bestvideo+bestaudio/best"
+	}
+
+	resNum, _ := strconv.Atoi(cleanRes)
+	if resNum >= 1440 {
+		// High resolutions - prioritize av01 then vp9
+		return fmt.Sprintf(
+			// AV1 with opus - best quality
+			"bestvideo[vcodec^=av01][height=%s]+bestaudio[acodec^=opus]/"+
+				"bestvideo[vcodec^=av01][height=%s]+bestaudio[ext=webm]/"+
+				"bestvideo[vcodec^=av01][height=%s]+bestaudio/"+
+				// AV1 <= height fallback
+				"bestvideo[vcodec^=av01][height<=%s]+bestaudio[acodec^=opus]/"+
+				"bestvideo[vcodec^=av01][height<=%s]+bestaudio[ext=webm]/"+
+				"bestvideo[vcodec^=av01][height<=%s]+bestaudio/"+
+				// VP9 with opus
+				"bestvideo[vcodec^=vp9][height=%s]+bestaudio[acodec^=opus]/"+
+				"bestvideo[vcodec^=vp9][height=%s]+bestaudio[ext=webm]/"+
+				"bestvideo[vcodec^=vp9][height=%s]+bestaudio/"+
+				// VP9 <= height fallback
+				"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[acodec^=opus]/"+
+				"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[ext=webm]/"+
+				"bestvideo[vcodec^=vp9][height<=%s]+bestaudio/"+
+				// Any codec fallback
+				"bestvideo[height<=%s]+bestaudio[acodec^=opus]/"+
+				"bestvideo[height<=%s]+bestaudio[ext=webm]/"+
+				"bestvideo[height<=%s]+bestaudio/"+
+				"best[height<=%s]",
+			cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
+			cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
+			cleanRes, cleanRes, cleanRes, cleanRes,
+		)
+	}
+
+	// Standard resolutions - prioritize av01 then vp9 with opus
+	return fmt.Sprintf(
+		// AV1 with opus
+		"bestvideo[vcodec^=av01][height=%s]+bestaudio[acodec^=opus]/"+
+			"bestvideo[vcodec^=av01][height=%s]+bestaudio[ext=webm]/"+
+			"bestvideo[vcodec^=av01][height=%s]+bestaudio/"+
+			// AV1 <= height fallback
+			"bestvideo[vcodec^=av01][height<=%s]+bestaudio[acodec^=opus]/"+
+			"bestvideo[vcodec^=av01][height<=%s]+bestaudio[ext=webm]/"+
+			"bestvideo[vcodec^=av01][height<=%s]+bestaudio/"+
+			// VP9 with opus
+			"bestvideo[vcodec^=vp9][height=%s]+bestaudio[acodec^=opus]/"+
+			"bestvideo[vcodec^=vp9][height=%s]+bestaudio[ext=webm]/"+
+			"bestvideo[vcodec^=vp9][height=%s]+bestaudio/"+
+			// VP9 <= height fallback
+			"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[acodec^=opus]/"+
+			"bestvideo[vcodec^=vp9][height<=%s]+bestaudio[ext=webm]/"+
+			"bestvideo[vcodec^=vp9][height<=%s]+bestaudio/"+
+			// Any codec fallback
+			"bestvideo[height<=%s]+bestaudio[acodec^=opus]/"+
+			"bestvideo[height<=%s]+bestaudio[ext=webm]/"+
+			"bestvideo[height<=%s]+bestaudio/"+
+			"best[height<=%s]",
+		cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
+		cleanRes, cleanRes, cleanRes, cleanRes, cleanRes, cleanRes,
+		cleanRes, cleanRes, cleanRes, cleanRes,
 	)
 }
 
