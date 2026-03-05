@@ -70,25 +70,27 @@ go mod download
 
 **Development mode:**
 ```bash
-wails dev
+go run main.go
 ```
 
 **Build for production:**
 ```bash
-wails build
+# For Windows
+go install fyne.io/tools/cmd/fyne-cross@latest
+fyne-cross windows
+
+# For macOS
+fyne-cross darwin
+
+# For Linux
+fyne-cross linux
 ```
 
-**First time setup:** The app will ask to download yt-dlp and ffmpeg automatically. Just say yes - it handles everything and caches them locally. No need to install anything else manually.
+## Usage
 
 ## How to Use
 
-1. **Open the app** - It'll show the main download tab
-2. **Set your download folder** - Click "Change Download Location" (or it'll use the current folder)
-3. **Paste a URL** - YouTube or Instagram links both work
-4. **Pick your format:**
-   - For video: Choose resolution (144p to 4K, or "best")
-   - For audio: Pick format (MP3, M4A, Opus, WAV)
-5. **Hit download** - Watch the progress bar do its thing
+## Architecture
 
 ## Keyboard Shortcuts
 
@@ -130,7 +132,41 @@ wails build
 - Cancelled downloads automatically clean up `.part` and temp files
 - Failed downloads after max retries also trigger cleanup
 
-## Requirements
+- `main()`: Initializes the UI and event handlers
+- `fetchVideoInfo()`: Dynamically fetches video metadata and available resolutions
+- `formatBytes()`: Converts byte sizes to human-readable format
+- `formatETA()`: Converts duration to HH:MM:SS format
+
+## Project Structure
+
+```
+Predator/
+├── main.go              # Main application code
+├── go.mod              # Go module definition
+├── go.sum              # Go module checksums
+├── logov4.png          # Application icon
+├── asset/              # Icon and logo assets
+├── fyne-cross/         # Cross-platform build configuration
+├── sample.txt          # Code sample reference
+└── samplev*.txt        # Additional code samples
+```
+
+## Dependencies
+
+- **fyne.io/fyne/v2**: Cross-platform GUI framework
+- **github.com/lrstanley/go-ytdlp**: Go wrapper for yt-dlp
+
+
+## Performance
+
+- **Lazy Metadata Loading**: Video info is only fetched when a valid URL is entered
+- **Debounced Input**: 600ms debounce on URL input to prevent excessive API calls
+- **Atomic Operations**: Thread-safe state management for concurrent operations
+- **Streaming Download**: Supports live progress updates during download
+
+## Disclaimer
+
+**IMPORTANT LEGAL NOTICE**
 
 - Go 1.24+
 - Internet connection
@@ -163,20 +199,30 @@ Contributions are welcome! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) fi
 
 ## Legal Stuff
 
-**This tool is for educational and personal use only.** 
+- **Copyright Compliance**: Users must respect copyright laws and YouTube's Terms of Service. Downloading copyrighted content without proper authorization may be illegal in your jurisdiction.
+- **Terms of Service**: By using this application, you acknowledge that you are bound by YouTube's Terms of Service and agree not to violate them.
+- **Personal Use Only**: This tool is intended for downloading content you own or have permission to download.
+- **Liability**: The authors and contributors of Predator are not responsible for:
+  - Any copyright infringement or violations of third-party rights
+  - Misuse of downloaded content
+  - Any legal consequences arising from use of this application
+  - Data loss or corruption
+  - Any other damages resulting from use of this software
 
-- Respect copyright laws and YouTube's Terms of Service
-- Only download content you own or have permission to download
-- Don't use this to redistribute copyrighted material
-- The authors aren't responsible for how you use this tool
+### Responsible Use
 
-Basically: be cool, don't pirate stuff you shouldn't.
+Users should:
+- Only download content they have permission to download
+- Respect content creators' rights and intellectual property
+- Use downloaded content in compliance with local laws
+- Not distribute copyrighted content without proper licensing
+- Be aware that many YouTube videos are protected by copyright
 
-## License
+### No Warranty
 
-MIT License - see [LICENSE](LICENSE) file.
+This application is provided "as-is" without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, or non-infringement.
 
----
+The authors assume no responsibility for any illegal activities or misuse of this tool. By using Predator, you accept all risks and responsibilities associated with your downloads.
 
 Built with [Wails](https://wails.io/) + Go + vanilla JS. No React, no bloat.
 
