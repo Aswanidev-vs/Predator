@@ -1,0 +1,62 @@
+name: Submodule Cleanliness Check
+
+on:
+  pull_request:
+    branches: [ main, master ]
+  push:
+    branches: [ main, master ]
+
+jobs:
+  verify-submodules:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Initialize/Update submodules
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive --jobs 4
+
+      - name: Ensure submodule status has no anomalies
+        run: |
+          set -euo pipefail
+          anomalies=0
+
+          echo "Checking git submodule status output"
+          status_output=$(git submodule status --recursive || true)
+          echo "$status_output"
+
+          # If any line starts with '-', submodule is not initialized
+          if echo "$status_output" | grep -E '^-' >/dev/null; then
+            echo "ERROR: Found uninitialized submodules (lines starting with '-')" >&2
+            anomalies=1
+          fi
+
+          # If any line starts with '+', submodule commit is different than recorded
+          if echo "$status_output" | grep -E '^\+' >/dev/null; then
+            echo "ERROR: Found submodules not at recorded commit (lines starting with '+')" >&2
+            anomalies=1
+          fi
+
+          # If any line contains 'dirty', submodule has local changes
+          if echo "$status_output" | grep -E 'dirty' >/dev/null; then
+            echo "ERROR: Found dirty submodule working trees" >&2
+            anomalies=1
+          fi
+
+          # Also ensure working tree under submodules is clean
+          if ! git diff --submodule=diff --quiet; then
+            echo "ERROR: Detected differences in submodules (working tree not clean)" >&2
+            anomalies=1
+          fi
+
+          if [ "$anomalies" -ne 0 ]; then
+            echo "Submodule anomalies detected; failing the job." >&2
+            exit 1
+          fi
+
+          echo "Submodule status clean."
