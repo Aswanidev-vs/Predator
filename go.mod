@@ -7,13 +7,17 @@ module predator
 go 1.25.0
 
 require (
+<<<<<<< HEAD
+	github.com/lrstanley/go-ytdlp v1.3.2
+=======
 
 	github.com/lrstanley/go-ytdlp v1.3.0
+>>>>>>> 8b6d7ef7562a040c1fe88611c9571d845b477981
 	github.com/wailsapp/wails/v2 v2.11.0
 )
 
 require (
-	github.com/ProtonMail/go-crypto v1.3.0 // indirect
+	github.com/ProtonMail/go-crypto v1.4.0 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
