@@ -51,7 +51,7 @@ A simple desktop app for grabbing videos and audio from YouTube and Instagram. B
 - **Duplicate detection** - Warns if content was already downloaded
 - **Custom download folder** - Set once, remembers forever
 - **Download history** - View past downloads, filter by type, open file location
-- **Theme toggle** - Dark and light themes (Ctrl+T)
+
 
 ## Getting Started
 
@@ -90,14 +90,6 @@ wails build
    - For audio: Pick format (MP3, M4A, Opus, WAV)
 5. **Hit download** - Watch the progress bar do its thing
 
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+L` | Focus the URL input |
-| `Ctrl+D` | Start download (when button is active) |
-| `Ctrl+T` | Toggle dark/light theme |
-| `Esc` | Close any open modal |
 
 **Pro tips:**
 - Playlists show a modal where you can select specific videos to download
