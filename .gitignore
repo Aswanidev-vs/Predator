@@ -1,9 +1,5 @@
-<<<<<<< HEAD
 build/bin
-node_modules
 TODO.md
+node_modules/
 
-=======
-fyne-cross
-TODO.md
->>>>>>> 5c9da659bc26ab9faf682fb549dc7e0b599a7169
+

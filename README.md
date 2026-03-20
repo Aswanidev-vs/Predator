@@ -1,179 +1,174 @@
 # Predator
 
 <p align="center">
-<img src="asset/Predatorv1.png" width="200">
+<img src="logov4.png" width="200">
+</p>
+
+<p align="center">
+
+<a href="https://github.com/Aswanidev-vs/Predator/releases"><img src="https://img.shields.io/github/v/release/Aswanidev-vs/Predator?color=blue&include_prereleases&label=latest" alt="Release"></a>
 </p>
 
 A simple desktop app for grabbing videos and audio from YouTube and Instagram. Built with Go and Wails (web tech frontend), using yt-dlp under the hood to do the heavy lifting.
 
-## What it does
+## Table of Contents
 
-- **Download videos** from YouTube in any resolution from 144p up to 4K
-- **Grab audio only** in MP3, M4A, Opus, or WAV format
-- **Works with Instagram too** - reels, posts, stories, TV videos
-- **Playlist support** - Download entire YouTube playlists or pick specific videos
-- **Shows file sizes** before you download so you know what you're getting into
-- **Live progress tracking** - Watch speed, ETA, and percentage in real-time
-- **Cancel anytime** - Change your mind? Hit cancel and it stops cleanly
-- **Picks up where it left off** - Failed downloads auto-retry up to 3 times
-- **Duplicate detection** - Warns if you already downloaded something
-- **Choose where files go** - Set your download folder once, it remembers
-- **Keeps history** - See what you've downloaded, filter by video/audio, open files directly
-- **Dark and light themes** - Toggle with Ctrl+T
+- [Features](#features)
+- [Getting Started](#getting-started)
+- [How to Use](#how-to-use)
+- [Keyboard Shortcuts](#keyboard-shortcuts)
+- [Technical Details](#technical-details)
+- [Requirements](#requirements)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
 
-## Getting started
+## Features
+
+### Video Downloads
+- **Multiple resolutions** - From 144p up to 4K (2160p)
+- **Best quality option** - Automatically picks the highest available
+- **Smart codec handling** - Uses H.264 video + AAC audio for maximum compatibility
+- **WebM support** - Available with VP9/AV1 + Opus for better quality
+
+### Audio Downloads
+- **Multiple formats** - MP3, M4A, Opus, or WAV
+- **High quality output** - Uses best available source and converts to your chosen format
+- **MP3**: V0 quality (~245kbps)
+- **M4A**: AAC 192kbps
+- **WAV**: 16-bit PCM 44.1kHz stereo
+
+### Platform Support
+- **YouTube** - Videos, shorts, live streams
+- **Instagram** - Reels, posts, stories, TV videos
+
+### User Experience
+- **Playlist support** - Download entire playlists or select specific videos
+- **File size preview** - See file sizes before downloading
+- **Live progress** - Real-time speed, ETA, and percentage tracking
+- **Cancel anytime** - Clean cancellation with automatic temp file cleanup
+- **Auto-retry** - Failed downloads retry up to 3 times automatically
+- **Duplicate detection** - Warns if content was already downloaded
+- **Custom download folder** - Set once, remembers forever
+- **Download history** - View past downloads, filter by type, open file location
+
+
+## Getting Started
 
 You'll need **Go 1.24 or newer** installed.
 
 ```bash
+# Clone the repository
 git clone https://github.com/Aswanidev-vs/Predator.git
 cd Predator
+
+# Install dependencies
 go mod download
 ```
 
-# Predator - YouTube Downloader
-<p align="center">
-<img src="asset/Predatorv1.png">
-</p>
-A modern, cross-platform desktop application for downloading videos and audio from YouTube .
-It is built using Go and the Fyne GUI framework, with yt-dlp as the download engine.
+### Running the App
 
-The project focuses on simplicity, transparency, and responsive user experience while keeping the implementation clean and maintainable.
+**Development mode:**
+```bash
+wails dev
+```
 
-## Features
+**Build for production:**
+```bash
+wails build
+```
 
-- **Video Download**: Download YouTube videos in various resolutions (144p to 2160p)
-- **Audio Extraction**: Extract audio from videos in multiple formats (MP3, M4A, Opus, WAV)
-- **Real-time Metadata**: Fetches video information dynamically, showing available resolutions with file sizes
-- **Progress Tracking**: Live download progress ETA information
-- **Cancellable Downloads**: Stop downloads at any time
-- **Custom Output Directory**: Select and manage your download location
-- **Cross-platform**: Works on Windows, macOS, and Linux
+**First time setup:** The app will ask to download yt-dlp and ffmpeg automatically. Just say yes - it handles everything and caches them locally. No need to install anything else manually.
+
+## How to Use
+
+1. **Open the app** - It'll show the main download tab
+2. **Set your download folder** - Click "Change Download Location" (or it'll use the current folder)
+3. **Paste a URL** - YouTube or Instagram links both work
+4. **Pick your format:**
+   - For video: Choose resolution (144p to 4K, or "best")
+   - For audio: Pick format (MP3, M4A, Opus, WAV)
+5. **Hit download** - Watch the progress bar do its thing
+
+
+**Pro tips:**
+- Playlists show a modal where you can select specific videos to download
+- Click the folder icon in history to open where a file is saved
+- The app auto-updates yt-dlp to the latest version on each download
+
+## Technical Details
+
+### Video Format
+- **Container:** MP4 (with WebM option)
+- **Video codec:** H.264 (avc1) for maximum device compatibility
+- **Audio codec:** AAC (m4a) for best audio quality
+- **Fallback handling:** If preferred codec isn't available, automatically falls back to next best option
+
+### Audio Format
+- Uses best available source (webm/opus or m4a/aac) and converts to your chosen format using ffmpeg
+
+### File Locations
+- **Downloads:** User-selected folder or `PREDATOR_OUTPUT_DIR` environment variable
+- **History:** `~/.predator/history.json` (keeps last 100 items)
+- **Settings:** `~/.predator/settings.json`
+- **Dependencies:** `~/.cache/yt-dlp/` (yt-dlp, ffmpeg, ffprobe)
+
+### Performance
+- **Concurrent downloads:** Max 3 at a time to not overwhelm your connection
+- **Progress updates:** Every 200ms for smooth progress bars
+- **Speed smoothing:** Uses exponential moving average for stable speed display
+
+### Cleanup
+- Cancelled downloads automatically clean up `.part` and temp files
+- Failed downloads after max retries also trigger cleanup
 
 ## Requirements
 
-- **Go**: 1.24.0 or higher
-- **FFmpeg**: Required for audio extraction and video merging (automatically handled by yt-dlp)
-- **yt-dlp**: Automatically installed on first run
+- Go 1.24+
+- Internet connection
+- yt-dlp and ffmpeg (auto-installed on first run)
 
-## Installation
+## Troubleshooting
 
-### Clone the Repository
-```bash
-git clone https://github.com/Aswanidev-vs/Predator.git
-cd Predator
-```
+### "ffmpeg not found" error
+The app will prompt you to download ffmpeg on first run. If you skip it, you can:
+1. Install ffmpeg manually from [ffmpeg.org](https://ffmpeg.org)
+2. Or delete `~/.cache/yt-dlp/` and restart the app - it'll ask again
 
-### Install Dependencies
-```bash
-go mod download
-```
+### Slow downloads
+- Check your internet connection
+- YouTube might be throttling (try a different resolution)
+- Max 3 concurrent downloads - close other apps using bandwidth
 
-### Build and Run
-```bash
-go run main.go
-```
+### Download fails with "format not available"
+- Try a lower resolution
+- The video might be region-locked or unavailable
+- Try using "best" option for auto-selection of best available
 
-### Build for Distribution
-The project includes cross-platform build configuration in the `fyne-cross` directory:
+### "Permission denied" errors
+- Check if your download folder is writable
+- Try a different download location
 
-```bash
-# For Windows
-go install fyne.io/tools/cmd/fyne-cross@latest
-fyne-cross windows
+## Contributing
 
-# For macOS
-fyne-cross darwin
+Contributions are welcome! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) file for guidelines.
 
-# For Linux
-fyne-cross linux
-```
+## Legal Stuff
 
-## Usage
+**This tool is for educational and personal use only.** 
 
-1. **Launch the Application**: Run the executable or `go run main.go`
-2. **Set Download Location**: Click "Change Download Location" to select where videos will be saved
-3. **Paste YouTube URL**: Paste a YouTube video link into the URL field
-4. **Select Download Type**:
-   - **Video**: Choose a resolution and video will be downloaded with best audio merged
-   - **Audio**: Choose an audio format (MP3, M4A, Opus, WAV)
-5. **Click Download**: Start the download process
-6. **Monitor Progress**: Watch real-time progress, speed, and ETA
-7. **Cancel if Needed**: Click Cancel button to stop an ongoing download
+- Respect copyright laws and YouTube's Terms of Service
+- Only download content you own or have permission to download
+- Don't use this to redistribute copyrighted material
+- The authors aren't responsible for how you use this tool
 
-## Architecture
+Basically: be cool, don't pirate stuff you shouldn't.
 
-### Main Components
+## License
 
-- **UI Layer**: Built with [Fyne](https://fyne.io/) - a cross-platform GUI framework
-- **Download Engine**: Powered by [go-ytdlp](https://github.com/lrstanley/go-ytdlp) - a Go wrapper for yt-dlp
-- **Async Operations**: Uses goroutines for non-blocking UI interactions
-- **Progress Tracking**: Real-time progress callbacks with ETA calculations
+MIT License - see [LICENSE](LICENSE) file.
 
-### Key Functions
+---
 
-- `main()`: Initializes the UI and event handlers
-- `fetchVideoInfo()`: Dynamically fetches video metadata and available resolutions
-- `formatBytes()`: Converts byte sizes to human-readable format
-- `formatETA()`: Converts duration to HH:MM:SS format
-
-## Project Structure
-
-```
-Predator/
-├── main.go              # Main application code
-├── go.mod              # Go module definition
-├── go.sum              # Go module checksums
-├── logov4.png          # Application icon
-├── asset/              # Icon and logo assets
-├── fyne-cross/         # Cross-platform build configuration
-├── sample.txt          # Code sample reference
-└── samplev*.txt        # Additional code samples
-```
-
-## Dependencies
-
-- **fyne.io/fyne/v2**: Cross-platform GUI framework
-- **github.com/lrstanley/go-ytdlp**: Go wrapper for yt-dlp
-
-
-## Performance
-
-- **Lazy Metadata Loading**: Video info is only fetched when a valid URL is entered
-- **Debounced Input**: 600ms debounce on URL input to prevent excessive API calls
-- **Atomic Operations**: Thread-safe state management for concurrent operations
-- **Streaming Download**: Supports live progress updates during download
-
-## Disclaimer
-
-**IMPORTANT LEGAL NOTICE**
-
-This application is provided for educational and personal use only. Users are solely responsible for compliance with all applicable laws and regulations in their jurisdiction. 
-
-### Legal Considerations
-
-- **Copyright Compliance**: Users must respect copyright laws and YouTube's Terms of Service. Downloading copyrighted content without proper authorization may be illegal in your jurisdiction.
-- **Terms of Service**: By using this application, you acknowledge that you are bound by YouTube's Terms of Service and agree not to violate them.
-- **Personal Use Only**: This tool is intended for downloading content you own or have permission to download.
-- **Liability**: The authors and contributors of Predator are not responsible for:
-  - Any copyright infringement or violations of third-party rights
-  - Misuse of downloaded content
-  - Any legal consequences arising from use of this application
-  - Data loss or corruption
-  - Any other damages resulting from use of this software
-
-### Responsible Use
-
-Users should:
-- Only download content they have permission to download
-- Respect content creators' rights and intellectual property
-- Use downloaded content in compliance with local laws
-- Not distribute copyrighted content without proper licensing
-- Be aware that many YouTube videos are protected by copyright
-
-### No Warranty
-
-This application is provided "as-is" without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, or non-infringement.
-
-The authors assume no responsibility for any illegal activities or misuse of this tool. By using Predator, you accept all risks and responsibilities associated with your downloads.
+Built with [Wails](https://wails.io/) + Go + vanilla JS. No React, no bloat.
 
