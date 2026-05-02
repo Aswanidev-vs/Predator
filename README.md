@@ -102,6 +102,7 @@ wails build
 - **Container:** MP4 (with WebM option)
 - **Video codec:** H.264 (avc1) for maximum device compatibility
 - **Audio codec:** AAC (m4a) for best audio quality
+- **Codec transcoding:** All downloaded videos are transcoded to H.264+AAC via FFmpeg, ensuring audio and video always merge correctly regardless of source codec (VP9, AV1, Opus, etc.)
 - **Fallback handling:** If preferred codec isn't available, automatically falls back to next best option
 
 ### Audio Format
@@ -148,6 +149,11 @@ The app will prompt you to download ffmpeg on first run. If you skip it, you can
 ### "Permission denied" errors
 - Check if your download folder is writable
 - Try a different download location
+
+## Changelog
+
+### v1.2.0
+- **Fixed:** Audio not merging with video for certain YouTube videos. Old behavior used `--remux-video` which only remuxes the container without re-encoding, causing Opus audio to be silently copied into MP4 without conversion to AAC. This resulted in playable video but no audio in many media players. Now uses `--recode-video` with explicit FFmpeg transcoding to ensure all downloads produce standard H.264+AAC MP4 files.
 
 ## Contributing
 
