@@ -46,7 +46,6 @@ const (
 	maxConcurrentDownloads = 3
 	progressUpdateInterval = 200 * time.Millisecond
 	speedSmoothingAlpha    = 0.2
-	taskQueueSize          = 100
 	cleanupDelay           = 2 * time.Second
 	fetchTimeout           = 30 * time.Second
 	fetchDebounceDelay     = 600 * time.Millisecond
@@ -162,9 +161,7 @@ func (a *App) IsValidURL(url string) bool {
 
 // IsPlaylistURL checks if the URL is a YouTube playlist
 func (a *App) IsPlaylistURL(url string) bool {
-	// Check for playlist parameter in URL
-	playlistPattern := regexp.MustCompile(`[?&]list=([a-zA-Z0-9_-]+)`)
-	return playlistPattern.MatchString(url)
+	return rePlaylistPattern.MatchString(url)
 }
 
 // IsInstagramURL checks if the URL is an Instagram URL
@@ -366,8 +363,7 @@ func parseSizeString(sizeStr string) int64 {
 		return 0
 	}
 	sizeStr = strings.TrimPrefix(sizeStr, "~")
-	re := regexp.MustCompile(`([\d.]+)\s*([KMGT]?)i?B`)
-	matches := re.FindStringSubmatch(sizeStr)
+	matches := reParseSize.FindStringSubmatch(sizeStr)
 	if len(matches) < 3 {
 		return 0
 	}
@@ -399,8 +395,7 @@ func truncateError(err string, maxLen int) string {
 }
 
 func extractResolution(resolution string) string {
-	re := regexp.MustCompile(`^(\d+)p`)
-	matches := re.FindStringSubmatch(resolution)
+	matches := reExtractRes.FindStringSubmatch(resolution)
 	if len(matches) > 1 {
 		return matches[1]
 	}
@@ -594,28 +589,52 @@ func buildAudioFormatString(format string) string {
 /* -------------------- Queue System -------------------- */
 
 var (
-	taskQueue   = make(chan DownloadTask, taskQueueSize)
 	sem         chan struct{}
 	semOnce     sync.Once
 	activeTasks = make(map[string]context.CancelFunc)
 	tasksMu     sync.RWMutex
 	taskCounter uint64
 	historyMu   sync.RWMutex
+	ytdlpOnce   sync.Once
+)
+
+var (
+	rePlaylistPattern   = regexp.MustCompile(`[?&]list=([a-zA-Z0-9_-]+)`)
+	reParseSize         = regexp.MustCompile(`([\d.]+)\s*([KMGT]?)i?B`)
+	reExtractRes        = regexp.MustCompile(`^(\d+)p`)
+	reVideoIDQuery      = regexp.MustCompile(`[?&]v=([a-zA-Z0-9_-]{11})`)
+	reVideoIDShort      = regexp.MustCompile(`youtu\.be/([a-zA-Z0-9_-]{11})`)
+	reVideoIDShorts     = regexp.MustCompile(`youtube\.com/shorts/([a-zA-Z0-9_-]{11})`)
+	reVideoIDInstaPost  = regexp.MustCompile(`^https?://(www\.)?instagram\.com/p/([a-zA-Z0-9_-]+)`)
+	reVideoIDInstaReel  = regexp.MustCompile(`^https?://(www\.)?instagram\.com/reel/([a-zA-Z0-9_-]+)`)
+	reVideoIDInstaReels = regexp.MustCompile(`^https?://(www\.)?instagram\.com/reels/([a-zA-Z0-9_-]+)`)
 )
 
 /* -------------------- History Management -------------------- */
 
 func (a *App) getHistoryFilePath() string {
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Printf("WARNING: UserHomeDir failed: %v, using working directory", err)
+		homeDir, _ = os.Getwd()
+	}
 	historyDir := filepath.Join(homeDir, ".predator")
-	os.MkdirAll(historyDir, 0755)
+	if err := os.MkdirAll(historyDir, 0755); err != nil {
+		log.Printf("WARNING: MkdirAll failed for history dir: %v", err)
+	}
 	return filepath.Join(historyDir, "history.json")
 }
 
 func (a *App) getSettingsFilePath() string {
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Printf("WARNING: UserHomeDir failed: %v, using working directory", err)
+		homeDir, _ = os.Getwd()
+	}
 	settingsDir := filepath.Join(homeDir, ".predator")
-	os.MkdirAll(settingsDir, 0755)
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		log.Printf("WARNING: MkdirAll failed for settings dir: %v", err)
+	}
 	return filepath.Join(settingsDir, "settings.json")
 }
 
@@ -711,11 +730,6 @@ func (a *App) GetDownloadHistory() ([]DownloadHistory, error) {
 		return nil, err
 	}
 
-	// Sort by date descending (newest first)
-	for i, j := 0, len(history)-1; i < j; i, j = i+1, j-1 {
-		history[i], history[j] = history[j], history[i]
-	}
-
 	return history, nil
 }
 
@@ -730,7 +744,12 @@ func (a *App) SaveToHistory(item DownloadHistory) error {
 	var history []DownloadHistory
 	data, err := os.ReadFile(historyFile)
 	if err == nil {
-		json.Unmarshal(data, &history)
+		if err := json.Unmarshal(data, &history); err != nil {
+			log.Printf("WARNING: History file corrupted, backing up and starting fresh: %v", err)
+			backupPath := historyFile + ".bak"
+			os.WriteFile(backupPath, data, 0600)
+			history = []DownloadHistory{}
+		}
 	}
 
 	// Add new item at the beginning
@@ -881,7 +900,11 @@ func (a *App) generateTaskID() string {
 
 // getYtdlpCacheDir returns the cache directory for yt-dlp
 func getYtdlpCacheDir() string {
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Printf("WARNING: UserHomeDir failed: %v, using working directory", err)
+		homeDir, _ = os.Getwd()
+	}
 	cacheDir := filepath.Join(homeDir, ".cache", "yt-dlp")
 	return cacheDir
 }
@@ -1272,9 +1295,7 @@ func (a *App) FetchVideoInfo(url string) (*VideoInfo, error) {
 // AddToQueue adds a download task to the queue
 func (a *App) AddToQueue(task DownloadTask) (string, error) {
 	taskID := a.generateTaskID()
-	taskQueue <- task
 
-	// Start worker if not already running
 	go a.worker(task, taskID)
 
 	return taskID, nil
@@ -1282,39 +1303,27 @@ func (a *App) AddToQueue(task DownloadTask) (string, error) {
 
 // extractVideoID extracts the video ID from a YouTube or Instagram URL
 func extractVideoID(url string) string {
-	// Try to extract from youtube.com/watch?v=ID
-	re1 := regexp.MustCompile(`[?&]v=([a-zA-Z0-9_-]{11})`)
-	if matches := re1.FindStringSubmatch(url); len(matches) > 1 {
+	if matches := reVideoIDQuery.FindStringSubmatch(url); len(matches) > 1 {
 		return matches[1]
 	}
 
-	// Try to extract from youtu.be/ID
-	re2 := regexp.MustCompile(`youtu\.be/([a-zA-Z0-9_-]{11})`)
-	if matches := re2.FindStringSubmatch(url); len(matches) > 1 {
+	if matches := reVideoIDShort.FindStringSubmatch(url); len(matches) > 1 {
 		return matches[1]
 	}
 
-	// Try to extract from youtube.com/shorts/ID
-	re3 := regexp.MustCompile(`youtube\.com/shorts/([a-zA-Z0-9_-]{11})`)
-	if matches := re3.FindStringSubmatch(url); len(matches) > 1 {
+	if matches := reVideoIDShorts.FindStringSubmatch(url); len(matches) > 1 {
 		return matches[1]
 	}
 
-	// Try to extract from instagram.com/p/SHORTCODE
-	re4 := regexp.MustCompile(`^https?://(www\.)?instagram\.com/p/([a-zA-Z0-9_-]+)`)
-	if matches := re4.FindStringSubmatch(url); len(matches) > 2 {
+	if matches := reVideoIDInstaPost.FindStringSubmatch(url); len(matches) > 2 {
 		return "ig_" + matches[2]
 	}
 
-	// Try to extract from instagram.com/reel/SHORTCODE
-	re5 := regexp.MustCompile(`^https?://(www\.)?instagram\.com/reel/([a-zA-Z0-9_-]+)`)
-	if matches := re5.FindStringSubmatch(url); len(matches) > 2 {
+	if matches := reVideoIDInstaReel.FindStringSubmatch(url); len(matches) > 2 {
 		return "ig_" + matches[2]
 	}
 
-	// Try to extract from instagram.com/reels/SHORTCODE
-	re6 := regexp.MustCompile(`^https?://(www\.)?instagram\.com/reels/([a-zA-Z0-9_-]+)`)
-	if matches := re6.FindStringSubmatch(url); len(matches) > 2 {
+	if matches := reVideoIDInstaReels.FindStringSubmatch(url); len(matches) > 2 {
 		return "ig_" + matches[2]
 	}
 
@@ -1492,13 +1501,16 @@ func (a *App) cleanupPartialFiles(outDir, title, videoID string) {
 
 // UpdateYtDlp updates yt-dlp to the latest version
 func (a *App) UpdateYtDlp() error {
-	log.Println("Updating yt-dlp to latest version...")
-	_, err := ytdlp.Install(context.Background(), nil)
-	if err != nil {
-		ytdlp.MustInstall(context.Background(), nil)
-		return err
-	}
-	return nil
+	var updateErr error
+	ytdlpOnce.Do(func() {
+		log.Println("Updating yt-dlp to latest version...")
+		_, err := ytdlp.Install(context.Background(), nil)
+		if err != nil {
+			log.Printf("WARNING: yt-dlp update failed: %v", err)
+			updateErr = err
+		}
+	})
+	return updateErr
 }
 
 /* -------------------- Worker -------------------- */
