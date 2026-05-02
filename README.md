@@ -152,8 +152,17 @@ The app will prompt you to download ffmpeg on first run. If you skip it, you can
 
 ## Changelog
 
-### v1.2.0
-- **Fixed:** Audio not merging with video for certain YouTube videos. Old behavior used `--remux-video` which only remuxes the container without re-encoding, causing Opus audio to be silently copied into MP4 without conversion to AAC. This resulted in playable video but no audio in many media players. Now uses `--recode-video` with explicit FFmpeg transcoding to ensure all downloads produce standard H.264+AAC MP4 files.
+### v1.3.0
+- **Fixed:** Audio not merging with video for certain YouTube videos. Old behavior used `--remux-video` which only remuxes the container without re-encoding, causing Opus audio to be silently copied into MP4 without conversion to AAC. Now uses `--recode-video` with explicit FFmpeg transcoding to ensure all downloads produce standard H.264+AAC MP4 files.
+- **Fixed:** App would block permanently after 100 downloads due to a dead channel write that was never consumed.
+- **Fixed:** Corrupted history file would silently destroy all download history. Now backs up the corrupted file and starts fresh.
+- **Fixed:** yt-dlp update failure would panic and crash the entire app instead of returning an error gracefully.
+- **Fixed:** Concurrent yt-dlp updates from multiple download workers could race on the binary file. Updates now run once per session.
+- **Fixed:** URL validation was completely broken in the frontend — `IsValidYouTubeURL()` returns a Promise but was checked synchronously, so invalid URLs always passed through.
+- **Fixed:** Error in playlist URL detection could permanently lock the UI into a "fetching" state, blocking all subsequent URL fetches.
+- **Fixed:** Download type radio buttons were invisible to screen readers (`display: none`). Now uses a visually-hidden pattern for accessibility.
+- **Fixed:** History was displayed in reverse order (oldest first) instead of newest first.
+- **Fixed:** Various `null` pointer risks from unchecked `querySelector(':checked')` calls.
 
 ## Contributing
 
