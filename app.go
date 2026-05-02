@@ -1601,12 +1601,11 @@ func (a *App) worker(task DownloadTask, taskID string) {
 			dl := ytdlp.New().
 				Format(format).
 				MergeOutputFormat("mp4").
-				RemuxVideo("mp4").
+				RecodeVideo("mp4").
 				AudioFormat("m4a").
 				AudioQuality("0").
-				// Use ffmpeg to transcode any codec (vp9, av1, h264) to h264/aac
-				// This ensures single mp4 output regardless of source codec
 				PostProcessorArgs("FFmpegVideoConvertor:-c:v libx264 -preset fast -crf 23 -c:a aac -b:a 192k").
+				PostProcessorArgs("Merger+ffmpeg:-c:a aac -b:a 192k").
 				Output(filepath.Join(outDir, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
 				ProgressFunc(progressUpdateInterval, updateProgress)
 
