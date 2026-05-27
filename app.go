@@ -38,6 +38,26 @@ func NewApp() *App {
 // so we can call the runtime methods
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.setupPath()
+}
+
+// setupPath adds the cached yt-dlp directory to system PATH
+func (a *App) setupPath() {
+	cacheDir := getYtdlpCacheDir()
+	path := os.Getenv("PATH")
+	separator := ":"
+	if runtime.GOOS == "windows" {
+		separator = ";"
+	}
+	if !strings.Contains(path, cacheDir) {
+		os.Setenv("PATH", cacheDir+separator+path)
+		log.Printf("Added cached tools directory %s to PATH", cacheDir)
+	}
+}
+
+// ExtractVideoID exposes the private extractVideoID helper to the frontend
+func (a *App) ExtractVideoID(url string) string {
+	return extractVideoID(url)
 }
 
 /* -------------------- Constants -------------------- */
@@ -154,9 +174,36 @@ func (a *App) IsValidInstagramURL(url string) bool {
 	return false
 }
 
-// IsValidURL checks if URL is valid for YouTube or Instagram
+/* -------------------- X / Twitter URL Validation -------------------- */
+
+var xURLPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^(https?://)?(www\.)?x\.com/[A-Za-z0-9_]+/status/[\d]+`),
+	regexp.MustCompile(`^(https?://)?(www\.)?twitter\.com/[A-Za-z0-9_]+/status/[\d]+`),
+	regexp.MustCompile(`^(https?://)?(www\.)?x\.com/i/web/status/[\d]+`),
+}
+
+/* -------------------- M3U8 URL Validation -------------------- */
+
+// M3U8URLPattern validates direct m3u8 (HLS streaming) URLs
+var m3u8URLPattern = regexp.MustCompile(`^(https?://)?.+\.m3u8(\?.*)?$`)
+
+func (a *App) IsValidXURL(url string) bool {
+	for _, pattern := range xURLPatterns {
+		if pattern.MatchString(url) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsM3U8URL checks if URL is a direct m3u8 HLS stream URL
+func (a *App) IsM3U8URL(url string) bool {
+	return m3u8URLPattern.MatchString(url)
+}
+
+// IsValidURL checks if URL is valid for YouTube, Instagram, X/Twitter, or m3u8 HLS streams
 func (a *App) IsValidURL(url string) bool {
-	return a.IsValidYouTubeURL(url) || a.IsValidInstagramURL(url)
+	return a.IsValidYouTubeURL(url) || a.IsValidInstagramURL(url) || a.IsValidXURL(url) || a.IsM3U8URL(url)
 }
 
 // IsPlaylistURL checks if the URL is a YouTube playlist
@@ -752,6 +799,15 @@ func (a *App) SaveToHistory(item DownloadHistory) error {
 		}
 	}
 
+	// Filter out duplicate entries with the same URL or FilePath
+	var cleanHistory []DownloadHistory
+	for _, h := range history {
+		if h.URL != item.URL && (h.FilePath == "" || h.FilePath != item.FilePath) {
+			cleanHistory = append(cleanHistory, h)
+		}
+	}
+	history = cleanHistory
+
 	// Add new item at the beginning
 	history = append([]DownloadHistory{item}, history...)
 
@@ -1171,6 +1227,10 @@ func (a *App) CheckAndInstallDeps() error {
 
 	wailsRuntime.EventsEmit(a.ctx, "installing-deps", false)
 
+	if err == nil {
+		a.setupPath()
+	}
+
 	return err
 }
 
@@ -1301,30 +1361,42 @@ func (a *App) AddToQueue(task DownloadTask) (string, error) {
 	return taskID, nil
 }
 
-// extractVideoID extracts the video ID from a YouTube or Instagram URL
+// extractVideoID extracts the video/status ID from YouTube, Instagram, or X/Twitter URL
 func extractVideoID(url string) string {
+	// YouTube
 	if matches := reVideoIDQuery.FindStringSubmatch(url); len(matches) > 1 {
 		return matches[1]
 	}
-
 	if matches := reVideoIDShort.FindStringSubmatch(url); len(matches) > 1 {
 		return matches[1]
 	}
-
 	if matches := reVideoIDShorts.FindStringSubmatch(url); len(matches) > 1 {
 		return matches[1]
 	}
 
+	// Instagram
 	if matches := reVideoIDInstaPost.FindStringSubmatch(url); len(matches) > 2 {
 		return "ig_" + matches[2]
 	}
-
 	if matches := reVideoIDInstaReel.FindStringSubmatch(url); len(matches) > 2 {
 		return "ig_" + matches[2]
 	}
-
 	if matches := reVideoIDInstaReels.FindStringSubmatch(url); len(matches) > 2 {
 		return "ig_" + matches[2]
+	}
+
+	// X/Twitter status ID
+	reXStatus1 := regexp.MustCompile(`^(https?://)?(www\.)?x\.com/[A-Za-z0-9_]+/status/([\d]+)`)
+	if matches := reXStatus1.FindStringSubmatch(url); len(matches) > 2 {
+		return "x_" + matches[2]
+	}
+	reXStatus2 := regexp.MustCompile(`^(https?://)?(www\.)?twitter\.com/[A-Za-z0-9_]+/status/([\d]+)`)
+	if matches := reXStatus2.FindStringSubmatch(url); len(matches) > 2 {
+		return "x_" + matches[2]
+	}
+	reXStatus3 := regexp.MustCompile(`^(https?://)?(www\.)?x\.com/i/web/status/([\d]+)`)
+	if matches := reXStatus3.FindStringSubmatch(url); len(matches) > 1 {
+		return "x_" + matches[1]
 	}
 
 	return ""
@@ -1608,26 +1680,90 @@ func (a *App) worker(task DownloadTask, taskID string) {
 			break
 		}
 
+		// Detect if this is an m3u8/HLS stream URL
+		isM3U8 := a.IsM3U8URL(task.URL)
+		// Detect if this is a Twitter/X URL
+		isTwitter := strings.Contains(task.URL, "twitter.com") || strings.Contains(task.URL, "x.com")
+
 		if task.Type == "Video" {
-			format := buildVideoFormatString(task.CleanRes, true)
+			var format string
+			if isM3U8 {
+				// For m3u8/HLS streams, use bestvideo with remuxing to mp4
+				format = "bestvideo[ext=mp4]/bestvideo[ext=m4a]/bestvideo[ext=webm]/bestvideo/best"
+			} else {
+				format = buildVideoFormatString(task.CleanRes, true)
+			}
+
+			// Build referer arg if Twitter/X
+			refererArg := ""
+			if isTwitter {
+				refererArg = "--referer=https://x.com/"
+			}
+
 			dl := ytdlp.New().
 				Format(format).
+				NoPlaylist().
+				NoCheckCertificates().
+				IgnoreErrors().
+				Impersonate("chrome").
+				Downloader("aria2c").
+				Downloader("m3u8:aria2c").
+				DownloaderArgs("aria2c:-x 16 -k 1M "+refererArg).
 				MergeOutputFormat("mp4").
 				RecodeVideo("mp4").
-				AudioFormat("m4a").
 				AudioQuality("0").
-				PostProcessorArgs("FFmpegVideoConvertor:-c:v libx264 -preset fast -crf 23 -c:a aac -b:a 192k").
+				PostProcessorArgs("FFmpegVideoConvertor:-c:v libx264 -preset fast -crf 23").
 				PostProcessorArgs("Merger+ffmpeg:-c:a aac -b:a 192k").
 				Output(filepath.Join(outDir, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
 				ProgressFunc(progressUpdateInterval, updateProgress)
 
 			_, err = dl.Run(ctx, task.URL)
+		} else if task.Type == "Image" {
+			// Download images (or video thumbnails/media) from X/Twitter.
+			refererArg := ""
+			if isTwitter {
+				refererArg = "--referer=https://x.com/"
+			}
+
+			dl := ytdlp.New().
+				Format("best").
+				NoPlaylist().
+				NoCheckCertificates().
+				IgnoreErrors().
+				Impersonate("chrome").
+				Downloader("aria2c").
+				Downloader("m3u8:aria2c").
+				DownloaderArgs("aria2c:-x 16 -k 1M "+refererArg).
+				Output(filepath.Join(outDir, "%(title)s [%(id)s].%(ext)s")).
+				ProgressFunc(progressUpdateInterval, updateProgress)
+
+			_, err = dl.Run(ctx, task.URL)
 		} else {
-			format := buildAudioFormatString(task.AudioFormat)
+			// Audio download
+			var format string
+			if isM3U8 {
+				// For m3u8/HLS audio streams
+				format = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
+			} else {
+				format = buildAudioFormatString(task.AudioFormat)
+			}
+
+			refererArg := ""
+			if isTwitter {
+				refererArg = "--referer=https://x.com/"
+			}
+
 			dl := ytdlp.New().
 				ExtractAudio().
 				AudioFormat(task.AudioFormat).
 				AudioQuality("0").
+				NoPlaylist().
+				NoCheckCertificates().
+				IgnoreErrors().
+				Impersonate("chrome").
+				Downloader("aria2c").
+				Downloader("m3u8:aria2c").
+				DownloaderArgs("aria2c:-x 16 -k 1M "+refererArg).
 				Format(format).
 				Output(filepath.Join(outDir, "%(title)s [%(id)s].%(ext)s")).
 				ProgressFunc(progressUpdateInterval, updateProgress)
@@ -1651,6 +1787,11 @@ func (a *App) worker(task DownloadTask, taskID string) {
 
 		if err == nil {
 			break
+		}
+
+		// Log full details for twitter failures
+		if strings.Contains(task.URL, "twitter.com") || strings.Contains(task.URL, "x.com") {
+			log.Printf("Twitter/X download attempt failed: %v", err)
 		}
 
 		if ctx.Err() == context.Canceled {

@@ -3,12 +3,13 @@ module Predator
 go 1.25.0
 
 require (
-	github.com/lrstanley/go-ytdlp v1.3.2
-	github.com/wailsapp/wails/v2 v2.11.0
+	github.com/lrstanley/go-ytdlp v1.3.5
+	github.com/wailsapp/wails/v2 v2.12.0
 )
 
 require (
-	github.com/ProtonMail/go-crypto v1.4.0 // indirect
+	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
+	github.com/ProtonMail/go-crypto v1.4.1 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
@@ -34,10 +35,10 @@ require (
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
-	golang.org/x/crypto v0.48.0 // indirect
-	golang.org/x/net v0.49.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
+	golang.org/x/crypto v0.51.0 // indirect
+	golang.org/x/net v0.53.0 // indirect
+	golang.org/x/sys v0.44.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 )
 
 // replace github.com/wailsapp/wails/v2 v2.11.0 => C:\Users\LENOVO\go\pkg\mod
