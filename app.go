@@ -1710,10 +1710,8 @@ func (a *App) worker(task DownloadTask, taskID string) {
 				Downloader("m3u8:aria2c").
 				DownloaderArgs("aria2c:-x 16 -k 1M "+refererArg).
 				MergeOutputFormat("mp4").
-				RecodeVideo("mp4").
 				AudioQuality("0").
-				PostProcessorArgs("FFmpegVideoConvertor:-c:v libx264 -preset fast -crf 23").
-				PostProcessorArgs("Merger+ffmpeg:-c:a aac -b:a 192k").
+				PostProcessorArgs("Merger+ffmpeg:-c:v copy -c:a aac -b:a 192k -strict experimental").
 				Output(filepath.Join(outDir, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
 				ProgressFunc(progressUpdateInterval, updateProgress)
 
