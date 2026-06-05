@@ -651,7 +651,7 @@ var (
 	reExtractRes        = regexp.MustCompile(`^(\d+)p`)
 	reVideoIDQuery      = regexp.MustCompile(`[?&]v=([a-zA-Z0-9_-]{11})`)
 	reVideoIDShort      = regexp.MustCompile(`youtu\.be/([a-zA-Z0-9_-]{11})`)
-	reVideoIDShorts     = regexp.MustCompile(`youtube\.com/shorts/([a-zA-Z0-9_-]{11})`)
+	reVideoIDShorts     = regexp.MustCompile(`^https?://(www\.)?youtube\.com/shorts/([a-zA-Z0-9_-]{11})(?:[/?#].*)?$`)
 	reVideoIDInstaPost  = regexp.MustCompile(`^https?://(www\.)?instagram\.com/p/([a-zA-Z0-9_-]+)`)
 	reVideoIDInstaReel  = regexp.MustCompile(`^https?://(www\.)?instagram\.com/reel/([a-zA-Z0-9_-]+)`)
 	reVideoIDInstaReels = regexp.MustCompile(`^https?://(www\.)?instagram\.com/reels/([a-zA-Z0-9_-]+)`)
