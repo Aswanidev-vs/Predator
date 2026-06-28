@@ -47,10 +47,10 @@ jobs:
         run: choco install innosetup -y
 
       - name: Build Windows Installer
-        shell: bash
+        shell: pwsh
         run: |
-          export PATH="$PATH:/c/Program Files (x86)/Inno Setup 6"
-          iscc.exe /DMyAppVersion="${{ steps.version.outputs.VERSION }}" /DMyAppFilename="Predator.exe" "build/windows/installer/installer.iss"
+          $env:PATH = "${env:PATH};C:\Program Files (x86)\Inno Setup 6"
+          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" "/DMyAppVersion=${{ steps.version.outputs.VERSION }}" "/DMyAppFilename=Predator.exe" "build\windows\installer\installer.iss"
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
