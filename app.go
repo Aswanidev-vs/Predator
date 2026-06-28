@@ -72,6 +72,7 @@ const (
 	maxRetries             = 3
 	retryBaseDelay         = 2 * time.Second
 	prefOutputDir          = "output_dir"
+	mergeTimeout           = 5 * time.Minute // Timeout for merge operations
 )
 
 /* -------------------- Types -------------------- */
@@ -459,9 +460,11 @@ func extractResolution(resolution string) string {
 func buildVideoFormatString(cleanRes string, preferH264 bool) string {
 	// Build format string that prioritizes h264+aac for mp4 container compatibility
 	// Use separate selection (bv*+ba*) to ensure proper download and merging
+	// IMPORTANT: Always prefer m4a/aac audio to avoid re-encoding during merge
 
 	if cleanRes == "best" {
 		// Best quality - prioritize h264 with aac/m4a for reliable mp4 merging
+		// Order: h264+m4a (no re-encode needed) > h264+mp4a > h264+any > vp9+m4a > vp9+any > av01+m4a > av01+any > any+m4a > any+any
 		return "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/" +
 			"bestvideo[vcodec^=avc1]+bestaudio/" +
 			"bestvideo[vcodec^=vp9]+bestaudio[ext=m4a]/bestvideo[vcodec^=vp9]+bestaudio[acodec^=mp4a]/" +
@@ -1476,7 +1479,6 @@ func (a *App) cleanupPartialFiles(outDir, title, videoID string) {
 	log.Printf("Title words for matching: %v", titleWords)
 
 	deletedCount := 0
-	cutoffTime := time.Now().Add(-5 * time.Minute) // Files modified in last 5 minutes
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -1500,35 +1502,34 @@ func (a *App) cleanupPartialFiles(outDir, title, videoID string) {
 		// Check if filename matches - use video ID if available, otherwise use title words
 		matches := false
 
-		// Method 1: Check if video ID is in filename (most reliable)
+		// Method 1: Check if video ID is in filename (most reliable - avoids false positives)
 		if videoID != "" && strings.Contains(filename, videoID) {
 			matches = true
 			log.Printf("Match found: videoID %q in filename %q", videoID, filename)
 		}
 
 		// Method 2: Check if any significant word from title is in filename
-		if !matches {
+		// Only match if at least 2 words match to reduce false positives from concurrent downloads
+		if !matches && len(titleWords) >= 2 {
+			matchCount := 0
 			for _, word := range titleWords {
 				if strings.Contains(filenameLower, word) {
-					matches = true
-					log.Printf("Match found: word %q in filename %q", word, filename)
-					break
+					matchCount++
 				}
+			}
+			// Require at least 2 word matches to reduce false positives
+			if matchCount >= 2 {
+				matches = true
+				log.Printf("Match found: %d title words in filename %q", matchCount, filename)
 			}
 		}
 
-		// Method 3: Check if file was recently modified (within last 5 minutes)
-		if !matches {
-			if info, err := entry.Info(); err == nil {
-				if info.ModTime().After(cutoffTime) {
-					matches = true
-					log.Printf("Match found: recent file %q (modified %v)", filename, info.ModTime())
-				}
-			}
-		}
+		// Method 3: Check if file was recently modified AND matches title words (safer than just recent)
+		// Removed: purely time-based matching is too risky with concurrent downloads
 
-		// Method 4: If we have very few temp files (less than 5), assume they might be ours
-		if !matches && len(tempFiles) <= 5 {
+		// Method 4: If we have very few temp files (less than 3), assume they might be ours
+		// Reduced threshold from 5 to 3 to be more conservative
+		if !matches && len(tempFiles) <= 3 {
 			matches = true
 			log.Printf("Match found: low temp file count (%d), assuming %s is ours", len(tempFiles), filename)
 		}
@@ -1668,6 +1669,7 @@ func (a *App) worker(task DownloadTask, taskID string) {
 	a.UpdateYtDlp()
 
 	var err error
+	var timedOut bool
 
 	// Retry logic
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -1685,6 +1687,10 @@ func (a *App) worker(task DownloadTask, taskID string) {
 		// Detect if this is a Twitter/X URL
 		isTwitter := strings.Contains(task.URL, "twitter.com") || strings.Contains(task.URL, "x.com")
 
+		// Create timeout context for download + merge operation
+		downloadCtx, downloadCancel := context.WithTimeout(ctx, mergeTimeout)
+		timedOut = false
+
 		if task.Type == "Video" {
 			var format string
 			if isM3U8 {
@@ -1700,24 +1706,60 @@ func (a *App) worker(task DownloadTask, taskID string) {
 				refererArg = "--referer=https://x.com/"
 			}
 
-			dl := ytdlp.New().
-				Format(format).
-				NoPlaylist().
-				NoCheckCertificates().
-				IgnoreErrors().
-				Impersonate("chrome").
-				Downloader("aria2c").
-				Downloader("m3u8:aria2c").
-				DownloaderArgs("aria2c:-x 16 -k 1M "+refererArg).
-				MergeOutputFormat("mp4").
-				RecodeVideo("mp4").
-				AudioQuality("0").
-				PostProcessorArgs("FFmpegVideoConvertor:-c:v libx264 -preset fast -crf 23").
-				PostProcessorArgs("Merger+ffmpeg:-c:a aac -b:a 192k").
-				Output(filepath.Join(outDir, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
-				ProgressFunc(progressUpdateInterval, updateProgress)
+			// Fallback strategy: try copy first (fast), then re-encode if merge fails
+			// This handles edge cases where source claims m4a/AAC but has format issues
+			mergerArgsList := []string{}
+			if task.AudioFormat == "m4a" || task.AudioFormat == "aac" {
+				// Try copy first (fast, no quality loss), fallback to re-encode
+				mergerArgsList = []string{
+					"-c:v copy -c:a copy",           // Fast path: copy if compatible
+					"-c:v copy -c:a aac -b:a 192k",  // Fallback: re-encode audio
+				}
+			} else {
+				// Audio needs re-encoding (opus, webm, etc.)
+				mergerArgsList = []string{
+					"-c:v copy -c:a aac -b:a 192k",
+				}
+			}
 
-			_, err = dl.Run(ctx, task.URL)
+			// Try each merger args until one succeeds
+			for i, mergerArgs := range mergerArgsList {
+				dl := ytdlp.New().
+					Format(format).
+					NoPlaylist().
+					NoCheckCertificates().
+					IgnoreErrors().
+					Impersonate("chrome").
+					Downloader("aria2c").
+					Downloader("m3u8:aria2c").
+					DownloaderArgs("aria2c:-x 16 -k 1M "+refererArg).
+					MergeOutputFormat("mp4").
+					AudioQuality("0").
+					PostProcessorArgs("Merger+ffmpeg:" + mergerArgs).
+					Output(filepath.Join(outDir, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
+					ProgressFunc(progressUpdateInterval, updateProgress)
+
+				_, err = dl.Run(downloadCtx, task.URL)
+
+				if err == nil {
+					break // Success
+				}
+
+				// Check if it's a merge/codec error worth retrying with re-encode
+				errStr := err.Error()
+				isMergeError := strings.Contains(errStr, "codec") ||
+					strings.Contains(errStr, "merge") ||
+					strings.Contains(errStr, "Invalid data") ||
+					strings.Contains(errStr, "exit status")
+
+				if isMergeError && i < len(mergerArgsList)-1 {
+					log.Printf("Merge failed with '%s', retrying with re-encode: %v", mergerArgs, err)
+					continue // Try next merger args
+				}
+
+				break // Non-merge error or last attempt
+			}
+			downloadCancel()
 		} else if task.Type == "Image" {
 			// Download images (or video thumbnails/media) from X/Twitter.
 			refererArg := ""
@@ -1737,7 +1779,8 @@ func (a *App) worker(task DownloadTask, taskID string) {
 				Output(filepath.Join(outDir, "%(title)s [%(id)s].%(ext)s")).
 				ProgressFunc(progressUpdateInterval, updateProgress)
 
-			_, err = dl.Run(ctx, task.URL)
+			_, err = dl.Run(downloadCtx, task.URL)
+			downloadCancel()
 		} else {
 			// Audio download
 			var format string
@@ -1770,6 +1813,7 @@ func (a *App) worker(task DownloadTask, taskID string) {
 
 			// For MP3 and WAV, we need to ensure proper conversion from webm/opus sources
 			// Add postprocessor args to force re-encoding to the target format
+			// Removed deprecated -strict experimental flag (not needed in modern ffmpeg)
 			if task.AudioFormat == "mp3" {
 				// Force re-encode to MP3 with high quality VBR (V0 ~ 245kbps)
 				// Using -id3v2_version 3 for better compatibility
@@ -1778,11 +1822,15 @@ func (a *App) worker(task DownloadTask, taskID string) {
 				// Force re-encode to WAV 16-bit PCM 44.1kHz
 				dl = dl.PostProcessorArgs("FFmpegExtractAudio:-acodec pcm_s16le -ar 44100 -ac 2")
 			} else if task.AudioFormat == "m4a" {
-				// For m4a, ensure we're using AAC codec
+				// For m4a, ensure we're using AAC codec (no -strict experimental needed)
 				dl = dl.PostProcessorArgs("FFmpegExtractAudio:-c:a aac -b:a 192k")
 			}
 
-			_, err = dl.Run(ctx, task.URL)
+			_, err = dl.Run(downloadCtx, task.URL)
+			if downloadCtx.Err() == context.DeadlineExceeded {
+				timedOut = true
+			}
+			downloadCancel()
 		}
 
 		if err == nil {
@@ -1803,15 +1851,21 @@ func (a *App) worker(task DownloadTask, taskID string) {
 	if err != nil {
 		if ctx.Err() == context.Canceled {
 			wailsRuntime.EventsEmit(a.ctx, "task-cancelled", taskID)
+		} else if timedOut {
+			// Timeout occurred during download or merge
+			wailsRuntime.EventsEmit(a.ctx, "task-error", taskID, "Failed: download/merge timed out. Try lower resolution or check connection.")
 		} else {
 			errStr := err.Error()
 			if strings.Contains(errStr, "codec") ||
 				strings.Contains(errStr, "merge") ||
 				strings.Contains(errStr, "ffmpeg") ||
-				strings.Contains(errStr, "postprocessor") {
-				wailsRuntime.EventsEmit(a.ctx, "task-error", taskID, "Failed: codec/merge error. Try lower resolution.")
+				strings.Contains(errStr, "postprocessor") ||
+				strings.Contains(errStr, "Invalid data") ||
+				strings.Contains(errStr, "No such file") ||
+				strings.Contains(errStr, "exit status") {
+				wailsRuntime.EventsEmit(a.ctx, "task-error", taskID, "Failed: codec/merge error. Try lower resolution or different format.")
 			} else {
-				wailsRuntime.EventsEmit(a.ctx, "task-error", taskID, truncateError(err.Error(), 50))
+				wailsRuntime.EventsEmit(a.ctx, "task-error", taskID, truncateError(err.Error(), 80))
 			}
 		}
 	} else {
@@ -1821,39 +1875,64 @@ func (a *App) worker(task DownloadTask, taskID string) {
 		var actualFilePath string
 		var fileSize int64
 
-		// Try to find the file with the title pattern
-		pattern := filepath.Join(outDir, "*"+strings.ReplaceAll(task.Title, " ", "*")+"*")
-		if files, err := filepath.Glob(pattern); err == nil && len(files) > 0 {
-			// Find the largest file (in case there are multiple matches)
-			var largestFile string
-			var largestSize int64
-			for _, f := range files {
-				if info, err := os.Stat(f); err == nil && !info.IsDir() {
-					if info.Size() > largestSize {
-						largestSize = info.Size()
-						largestFile = f
+		// Extract video ID for reliable file matching
+		videoID := extractVideoID(task.URL)
+
+		// Method 1: Find file by video ID (most reliable - avoids title matching issues)
+		if videoID != "" {
+			if entries, err := os.ReadDir(outDir); err == nil {
+				for _, entry := range entries {
+					if !entry.IsDir() && strings.Contains(entry.Name(), videoID) {
+						fullPath := filepath.Join(outDir, entry.Name())
+						if info, err := os.Stat(fullPath); err == nil {
+							actualFilePath = fullPath
+							fileSize = info.Size()
+							break
+						}
 					}
 				}
 			}
-			if largestFile != "" {
-				actualFilePath = largestFile
-				fileSize = largestSize
+		}
+
+		// Method 2: Find file by title pattern (fallback)
+		if actualFilePath == "" {
+			pattern := filepath.Join(outDir, "*"+strings.ReplaceAll(task.Title, " ", "*")+"*")
+			if files, err := filepath.Glob(pattern); err == nil && len(files) > 0 {
+				// Find the largest file (in case there are multiple matches)
+				var largestFile string
+				var largestSize int64
+				for _, f := range files {
+					if info, err := os.Stat(f); err == nil && !info.IsDir() {
+						if info.Size() > largestSize {
+							largestSize = info.Size()
+							largestFile = f
+						}
+					}
+				}
+				if largestFile != "" {
+					actualFilePath = largestFile
+					fileSize = largestSize
+				}
 			}
 		}
 
-		// If still not found, try a broader search
+		// Method 3: Find most recent mp4/m4a file (last resort)
 		if actualFilePath == "" {
-			// List all files in directory and find the most recent one
 			if entries, err := os.ReadDir(outDir); err == nil {
 				var mostRecentFile string
 				var mostRecentTime time.Time
 				for _, entry := range entries {
 					if !entry.IsDir() {
-						info, err := entry.Info()
-						if err == nil {
-							if info.ModTime().After(mostRecentTime) {
-								mostRecentTime = info.ModTime()
-								mostRecentFile = filepath.Join(outDir, entry.Name())
+						name := strings.ToLower(entry.Name())
+						// Only consider video/audio files, not temp files
+						if strings.HasSuffix(name, ".mp4") || strings.HasSuffix(name, ".m4a") ||
+							strings.HasSuffix(name, ".webm") || strings.HasSuffix(name, ".mkv") {
+							info, err := entry.Info()
+							if err == nil {
+								if info.ModTime().After(mostRecentTime) {
+									mostRecentTime = info.ModTime()
+									mostRecentFile = filepath.Join(outDir, entry.Name())
+								}
 							}
 						}
 					}
