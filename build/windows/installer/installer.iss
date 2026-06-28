@@ -21,7 +21,6 @@ UninstallIconFile=..\icon.ico
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
-PrivilegesRequiredOverriddenOwnedDialog=yes
 DisableProgramGroupPage=yes
 DisableReadyPage=no
 WizardStyle=modern
@@ -34,7 +33,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
-Source: "..\..\bin\bin\{#MyAppFilename}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\bin\{#MyAppFilename}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Predator"; Filename: "{app}\{#MyAppFilename}"

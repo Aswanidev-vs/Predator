@@ -39,21 +39,26 @@ jobs:
       - name: Build Windows AMD64
         run: wails build --platform windows/amd64 --clean
 
+      - name: List build output
+        shell: bash
+        run: find build/bin -type f -name "*.exe" -o -name "*.app" 2>/dev/null
+
       - name: Install Inno Setup
         run: choco install innosetup -y
 
       - name: Build Windows Installer
+        shell: pwsh
         run: |
           $env:PATH = "${env:PATH};C:\Program Files (x86)\Inno Setup 6"
-          iscc.exe /DMyAppVersion="${{ steps.version.outputs.VERSION }}" /DMyAppFilename="Predator.exe" "build\windows\installer\installer.iss"
+          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" "/DMyAppVersion=${{ steps.version.outputs.VERSION }}" "/DMyAppFilename=Predator.exe" "build\windows\installer\installer.iss"
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-amd64
           path: |
-            bin/Predator.exe
-            bin/Predator-*-windows-setup.exe
+            build/bin/Predator.exe
+            build/bin/Predator-*-windows-setup.exe
 
   build-macos:
     runs-on: macos-latest
@@ -81,40 +86,50 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
-      - name: Build macOS AMD64
-        run: wails build --platform darwin/amd64 --clean
-
-      - name: Build macOS ARM64
+      - name: Build macOS
         run: wails build --platform darwin/arm64 --clean
+
+      - name: Find built app bundle
+        id: find_app
+        run: |
+          APP_BUNDLE=$(ls -d build/bin/*.app 2>/dev/null | head -1)
+          echo "app_bundle=$APP_BUNDLE" >> $GITHUB_OUTPUT
+          echo "Found app bundle: $APP_BUNDLE"
 
       - name: Create DMG
         run: |
           brew install create-dmg
 
+          APP_BUNDLE="${{ steps.find_app.outputs.app_bundle }}"
+          if [ -z "$APP_BUNDLE" ]; then
+            echo "No .app bundle found in build/bin/"
+            ls -la build/bin/ 2>/dev/null || echo "build/bin/ does not exist"
+            exit 1
+          fi
+
           mkdir -p Predator-dmg/Staging
-          cp bin/Predator Predator-dmg/Staging/
-          cp -r bin/Predator.app Predator-dmg/Staging/
+          cp -R "$APP_BUNDLE" Predator-dmg/Staging/
 
           create-dmg \
             --volname "Predator ${{ steps.version.outputs.VERSION }}" \
             --window-pos 200 120 \
             --window-size 800 400 \
             --icon-size 100 \
-            --icon "Predator.app" 200 190 \
-            --hide-extension "Predator.app" \
+            --icon "$(basename "$APP_BUNDLE")" 200 190 \
+            --hide-extension "$(basename "$APP_BUNDLE")" \
             --app-drop-link 600 190 \
-            "bin/Predator-${{ steps.version.outputs.VERSION }}-macos-universal.dmg" \
+            "build/bin/Predator-${{ steps.version.outputs.VERSION }}-macos-arm64.dmg" \
             "Predator-dmg/Staging/"
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macos-universal
+          name: macos-arm64
           path: |
-            bin/Predator-*-macos-universal.dmg
+            build/bin/Predator-*-macos-arm64.dmg
 
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -147,16 +162,19 @@ jobs:
       - name: Build Linux AMD64
         run: wails build --platform linux/amd64 --clean
 
+      - name: List build output
+        run: find build/bin -type f -name "Predator*" 2>/dev/null
+
       - name: Create tarball
         run: |
-          cd bin
+          cd build/bin
           tar -czf Predator-${{ steps.version.outputs.VERSION }}-linux-amd64.tar.gz Predator
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-amd64
-          path: bin/Predator-*-linux-amd64.tar.gz
+          path: build/bin/Predator-*-linux-amd64.tar.gz
 
   release:
     needs: [build-windows, build-macos, build-linux]
@@ -187,7 +205,7 @@ jobs:
           generate_release_notes: true
           files: |
             windows-amd64/**
-            macos-universal/**
+            macos-arm64/**
             linux-amd64/**
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
