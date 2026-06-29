@@ -606,7 +606,16 @@ function handleUrlInput() {
                 return;
             }
 
-            const isX = url.toLowerCase().includes('x.com') || url.toLowerCase().includes('twitter.com');
+            let isX = false;
+            try {
+                const hostname = new URL(url).hostname.toLowerCase();
+                isX = hostname === 'x.com' ||
+                    hostname.endsWith('.x.com') ||
+                    hostname === 'twitter.com' ||
+                    hostname.endsWith('.twitter.com');
+            } catch {
+                isX = false;
+            }
 
             // X image: backend handles image format selection, don't fetch video info
             if (selectedType === 'Image' && isX) {
