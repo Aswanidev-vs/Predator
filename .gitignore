@@ -1,5 +1,8 @@
 build/bin
 TODO.md
 node_modules/
+<<<<<<< HEAD
+=======
 .qodo/
 .mimocode/
+>>>>>>> cc0bd5c7d606a20ce77ec7eaf258a623b4e9f78d
