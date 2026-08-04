@@ -636,6 +636,26 @@ func buildAudioFormatString(format string) string {
 	}
 }
 
+// buildMergerArgsList returns the ffmpeg codec args tried in order when merging
+// video+audio into an MP4. The ladder starts with the fastest copy paths and ends
+// with a full H.264/AAC re-encode so a valid MP4 is always produced, even from
+// VP9/AV1 video sources that MP4 cannot mux by copy.
+func buildMergerArgsList(audioFormat string) []string {
+	args := []string{}
+	if audioFormat == "m4a" || audioFormat == "aac" {
+		// m4a/AAC audio can be copied directly, so keep a copy-fast path first.
+		args = append(args,
+			"-c:v copy -c:a copy",         // Fast path: copy if compatible
+			"-c:v copy -c:a aac -b:a 192k", // Re-encode audio only
+		)
+	} else {
+		// Other audio (opus/webm) must be re-encoded; it can't be copied into mp4.
+		args = append(args, "-c:v copy -c:a aac -b:a 192k")
+	}
+	// Final fallback: re-encode everything to H.264/AAC.
+	return append(args, "-c:v libx264 -crf 18 -c:a aac -b:a 192k")
+}
+
 /* -------------------- Queue System -------------------- */
 
 var (
@@ -1706,21 +1726,7 @@ func (a *App) worker(task DownloadTask, taskID string) {
 				refererArg = "--referer=https://x.com/"
 			}
 
-			// Fallback strategy: try copy first (fast), then re-encode if merge fails
-			// This handles edge cases where source claims m4a/AAC but has format issues
-			mergerArgsList := []string{}
-			if task.AudioFormat == "m4a" || task.AudioFormat == "aac" {
-				// Try copy first (fast, no quality loss), fallback to re-encode
-				mergerArgsList = []string{
-					"-c:v copy -c:a copy",           // Fast path: copy if compatible
-					"-c:v copy -c:a aac -b:a 192k",  // Fallback: re-encode audio
-				}
-			} else {
-				// Audio needs re-encoding (opus, webm, etc.)
-				mergerArgsList = []string{
-					"-c:v copy -c:a aac -b:a 192k",
-				}
-			}
+			mergerArgsList := buildMergerArgsList(task.AudioFormat)
 
 			// Try each merger args until one succeeds
 			for i, mergerArgs := range mergerArgsList {
