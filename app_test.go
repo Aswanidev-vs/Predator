@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -119,6 +121,59 @@ func TestBuildWebmFormatString(t *testing.T) {
 	assert.Contains(t, got, "vp9", "webm should support VP9")
 	assert.Contains(t, got, "opus", "webm should use opus audio")
 	assert.NotContains(t, got, "ext=m4a", "webm should not request m4a audio")
+}
+
+func TestIsCandidateFile(t *testing.T) {
+	finals := []string{
+		"My Video [dQw4w9WgXcQ] (1080p).mp4",
+		"My Video [dQw4w9WgXcQ].m4a",
+		"Some Song [abc123].mp3",
+	}
+	for _, name := range finals {
+		assert.True(t, isCandidateFile(name), "%q is a final output", name)
+	}
+
+	intermediates := []string{
+		"My Video [dQw4w9WgXcQ] (1080p).f137.mp4.part", // part file
+		"My Video [dQw4w9WgXcQ].ytdl",                  // incomplete marker
+		"My Video [dQw4w9WgXcQ].temp.mp4",              // merger scratch
+		"My Video [dQw4w9WgXcQ] (1080p).f137.mp4",      // orphan stream fragment
+		"My Video [dQw4w9WgXcQ] (1080p).f140.m4a",      // orphan audio fragment
+	}
+	for _, name := range intermediates {
+		assert.False(t, isCandidateFile(name), "%q is an intermediate, not a final", name)
+	}
+}
+
+func TestFindCompletedFile_IgnoresFragmentsAndPrefersType(t *testing.T) {
+	dir := t.TempDir()
+
+	// Orphan fragment from a failed merge attempt (must be ignored).
+	fragment := filepath.Join(dir, "Clip [dQw4w9WgXcQ] (720p).f140.m4a")
+	// Loose audio grab of the same video (must lose to the video output).
+	looseAudio := filepath.Join(dir, "Clip [dQw4w9WgXcQ].m4a")
+	// The real merged output.
+	merged := filepath.Join(dir, "Clip [dQw4w9WgXcQ] (720p).mp4")
+	for _, p := range []string{fragment, looseAudio, merged} {
+		require.NoError(t, os.WriteFile(p, []byte("x"), 0644))
+	}
+
+	// Video task: must pick the merged mp4, never the fragment or loose audio.
+	path, size := findCompletedFile(dir, "dQw4w9WgXcQ", "Video")
+	assert.Equal(t, merged, path, "video task must resolve to the merged mp4")
+	assert.Greater(t, size, int64(0))
+
+	// Audio task on the same folder: must pick the loose m4a, not the fragment
+	// and not the mp4.
+	path, _ = findCompletedFile(dir, "dQw4w9WgXcQ", "Audio")
+	assert.Equal(t, looseAudio, path, "audio task must resolve to the .m4a final")
+}
+
+func TestFindCompletedFile_NoneExists(t *testing.T) {
+	dir := t.TempDir()
+	path, size := findCompletedFile(dir, "nope123", "Video")
+	assert.Empty(t, path)
+	assert.Equal(t, int64(0), size)
 }
 
 func countOccurrences(haystack []string, needle string) int {

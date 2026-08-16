@@ -17,12 +17,13 @@ func TestBuildMergerArgsList_UnknownFormatFallsBackToReencode(t *testing.T) {
 }
 
 func TestBuildMergerArgsList_CaseSensitivity(t *testing.T) {
-	// AudioFormat comes lowercase from the UI, but if it ever arrived uppercase it must
-	// NOT match the m4a copy-fast path. Documenting current (case-sensitive) behavior.
+	// AudioFormat comes lowercase from the UI, but the match must be
+	// case-insensitive so an uppercase M4A/AAC still takes the safe copy-fast
+	// path instead of being forced through an unnecessary audio re-encode.
 	upper := buildMergerArgsList("M4A")
 	lower := buildMergerArgsList("m4a")
-	assert.NotEqual(t, lower[0], upper[0], "uppercase M4A should not take the copy-fast path")
-	assert.Equal(t, "-c:v copy -c:a aac -b:a 192k", upper[0])
+	assert.Equal(t, lower, upper, "M4A and m4a must produce the same ladder")
+	assert.Equal(t, "-c:v copy -c:a copy", upper[0])
 }
 
 func TestBuildMergerArgsList_NeverEmpty(t *testing.T) {
