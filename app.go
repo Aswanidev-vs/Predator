@@ -72,7 +72,11 @@ const (
 	maxRetries             = 3
 	retryBaseDelay         = 2 * time.Second
 	prefOutputDir          = "output_dir"
-	mergeTimeout           = 5 * time.Minute // Timeout for merge operations
+	// Per-attempt budget shared by the download and the merge ladder. The final
+	// fallback re-encodes to H.264/AAC, which on long videos takes far more
+	// time than the download itself, so the old 5-minute cap killed merges
+	// mid-encode for anything bigger than a short clip.
+	downloadTimeout = 30 * time.Minute
 )
 
 /* -------------------- Types -------------------- */
@@ -642,7 +646,7 @@ func buildAudioFormatString(format string) string {
 // VP9/AV1 video sources that MP4 cannot mux by copy.
 func buildMergerArgsList(audioFormat string) []string {
 	args := []string{}
-	if audioFormat == "m4a" || audioFormat == "aac" {
+	if strings.EqualFold(audioFormat, "m4a") || strings.EqualFold(audioFormat, "aac") {
 		// m4a/AAC audio can be copied directly, so keep a copy-fast path first.
 		args = append(args,
 			"-c:v copy -c:a copy",         // Fast path: copy if compatible
@@ -654,6 +658,75 @@ func buildMergerArgsList(audioFormat string) []string {
 	}
 	// Final fallback: re-encode everything to H.264/AAC.
 	return append(args, "-c:v libx264 -crf 18 -c:a aac -b:a 192k")
+}
+
+// isCandidateFile reports whether name looks like a final yt-dlp output rather
+// than an intermediate. Part/ytdl/temp files and unmerged stream fragments
+// ("Title [id] (1080p).f137.mp4") are excluded.
+func isCandidateFile(name string) bool {
+	lower := strings.ToLower(name)
+	for _, marker := range []string{".part", ".ytdl", ".temp"} {
+		if strings.HasSuffix(lower, marker) || strings.Contains(lower, marker+".") {
+			return false
+		}
+	}
+	return !reStreamFragment.MatchString(lower)
+}
+
+// matchesTaskType reports whether path's extension is a plausible final output
+// for the given download type.
+func matchesTaskType(path, taskType string) bool {
+	lower := strings.ToLower(path)
+	switch taskType {
+	case "Video":
+		return strings.HasSuffix(lower, ".mp4") || strings.HasSuffix(lower, ".mkv") ||
+			strings.HasSuffix(lower, ".webm") || strings.HasSuffix(lower, ".mov")
+	case "Audio":
+		return strings.HasSuffix(lower, ".m4a") || strings.HasSuffix(lower, ".mp3") ||
+			strings.HasSuffix(lower, ".opus") || strings.HasSuffix(lower, ".wav") ||
+			strings.HasSuffix(lower, ".ogg") || strings.HasSuffix(lower, ".flac")
+	default:
+		return true
+	}
+}
+
+// findCompletedFile locates the final output yt-dlp produced for videoID in
+// outDir. Intermediates and stream fragments are ignored; when several final
+// outputs share the ID (e.g. an earlier audio grab of the same video), files
+// whose extension matches the task type win, then the most recently modified.
+func findCompletedFile(outDir, videoID, taskType string) (string, int64) {
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		return "", 0
+	}
+
+	pick := func(requireTypeMatch bool) (string, int64) {
+		var bestPath string
+		var bestTime time.Time
+		var bestSize int64
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.Contains(entry.Name(), videoID) || !isCandidateFile(entry.Name()) {
+				continue
+			}
+			if requireTypeMatch && !matchesTaskType(filepath.Join(outDir, entry.Name()), taskType) {
+				continue
+			}
+			fullPath := filepath.Join(outDir, entry.Name())
+			info, err := os.Stat(fullPath)
+			if err != nil {
+				continue
+			}
+			if bestPath == "" || info.ModTime().After(bestTime) {
+				bestPath, bestTime, bestSize = fullPath, info.ModTime(), info.Size()
+			}
+		}
+		return bestPath, bestSize
+	}
+
+	if path, size := pick(true); path != "" {
+		return path, size
+	}
+	return pick(false)
 }
 
 /* -------------------- Queue System -------------------- */
@@ -676,8 +749,9 @@ var (
 	reVideoIDShort      = regexp.MustCompile(`youtu\.be/([a-zA-Z0-9_-]{11})`)
 	reVideoIDShorts     = regexp.MustCompile(`youtube\.com/shorts/([a-zA-Z0-9_-]{11})`)
 	reVideoIDInstaPost  = regexp.MustCompile(`^https?://(www\.)?instagram\.com/p/([a-zA-Z0-9_-]+)`)
-	reVideoIDInstaReel  = regexp.MustCompile(`^https?://(www\.)?instagram\.com/reel/([a-zA-Z0-9_-]+)`)
-	reVideoIDInstaReels = regexp.MustCompile(`^https?://(www\.)?instagram\.com/reels/([a-zA-Z0-9_-]+)`)
+	reVideoIDInstaReel   = regexp.MustCompile(`^https?://(www\.)?instagram\.com/reel/([a-zA-Z0-9_-]+)`)
+	reVideoIDInstaReels  = regexp.MustCompile(`^https?://(www\.)?instagram\.com/reels/([a-zA-Z0-9_-]+)`)
+	reStreamFragment     = regexp.MustCompile(`\.f\d{1,6}\.[a-z0-9]+$`)
 )
 
 /* -------------------- History Management -------------------- */
@@ -1592,6 +1666,32 @@ func (a *App) cleanupPartialFiles(outDir, title, videoID string) {
 	}
 }
 
+// cleanupOrphanFragments removes unmerged yt-dlp stream fragments (e.g.
+// "Title [id] (1080p).f137.mp4") belonging to the given video. A merged final
+// never carries a .fNNN segment, so matching on the video ID is safe: these
+// are download intermediates, never user files.
+func (a *App) cleanupOrphanFragments(outDir, videoID string) {
+	if outDir == "" || videoID == "" {
+		return
+	}
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.Contains(name, videoID) ||
+			!reStreamFragment.MatchString(strings.ToLower(name)) {
+			continue
+		}
+		if removeErr := os.Remove(filepath.Join(outDir, name)); removeErr != nil {
+			log.Printf("WARNING: could not remove orphan fragment %s: %v", name, removeErr)
+		} else {
+			log.Printf("Removed orphan stream fragment: %s", name)
+		}
+	}
+}
+
 // UpdateYtDlp updates yt-dlp to the latest version
 func (a *App) UpdateYtDlp() error {
 	var updateErr error
@@ -1708,7 +1808,7 @@ func (a *App) worker(task DownloadTask, taskID string) {
 		isTwitter := strings.Contains(task.URL, "twitter.com") || strings.Contains(task.URL, "x.com")
 
 		// Create timeout context for download + merge operation
-		downloadCtx, downloadCancel := context.WithTimeout(ctx, mergeTimeout)
+		downloadCtx, downloadCancel := context.WithTimeout(ctx, downloadTimeout)
 		timedOut = false
 
 		if task.Type == "Video" {
@@ -1751,15 +1851,19 @@ func (a *App) worker(task DownloadTask, taskID string) {
 					break // Success
 				}
 
-				// Check if it's a merge/codec error worth retrying with re-encode
+				// Only a merge/codec error justifies falling back to the next
+				// re-encode step; network/extractor errors re-run identically
+				// with different merger args, so they must not trigger the ladder.
 				errStr := err.Error()
-				isMergeError := strings.Contains(errStr, "codec") ||
-					strings.Contains(errStr, "merge") ||
-					strings.Contains(errStr, "Invalid data") ||
-					strings.Contains(errStr, "exit status")
+				isMergeError := strings.Contains(errStr, "Postprocessing:") ||
+					strings.Contains(errStr, "codec") ||
+					strings.Contains(errStr, "Merging formats into") ||
+					strings.Contains(errStr, "Could not write header") ||
+					strings.Contains(errStr, "Invalid argument")
 
 				if isMergeError && i < len(mergerArgsList)-1 {
 					log.Printf("Merge failed with '%s', retrying with re-encode: %v", mergerArgs, err)
+					a.cleanupOrphanFragments(outDir, extractVideoID(task.URL))
 					continue // Try next merger args
 				}
 
@@ -1863,9 +1967,11 @@ func (a *App) worker(task DownloadTask, taskID string) {
 		} else {
 			errStr := err.Error()
 			if strings.Contains(errStr, "codec") ||
-				strings.Contains(errStr, "merge") ||
+				strings.Contains(errStr, "Merging formats into") ||
+				strings.Contains(errStr, "Postprocessing:") ||
 				strings.Contains(errStr, "ffmpeg") ||
 				strings.Contains(errStr, "postprocessor") ||
+				strings.Contains(errStr, "Could not write header") ||
 				strings.Contains(errStr, "Invalid data") ||
 				strings.Contains(errStr, "No such file") ||
 				strings.Contains(errStr, "exit status") {
@@ -1877,26 +1983,21 @@ func (a *App) worker(task DownloadTask, taskID string) {
 	} else {
 		wailsRuntime.EventsEmit(a.ctx, "task-completed", taskID, task)
 
-		// Find the actual downloaded file
+		// Find the actual downloaded file. Intermediates and unmerged stream
+		// fragments (e.g. "Title [id] (1080p).f137.mp4") must never be picked,
+		// otherwise a loose .m4a fragment gets attributed to the video.
 		var actualFilePath string
 		var fileSize int64
 
-		// Extract video ID for reliable file matching
 		videoID := extractVideoID(task.URL)
 
 		// Method 1: Find file by video ID (most reliable - avoids title matching issues)
 		if videoID != "" {
-			if entries, err := os.ReadDir(outDir); err == nil {
-				for _, entry := range entries {
-					if !entry.IsDir() && strings.Contains(entry.Name(), videoID) {
-						fullPath := filepath.Join(outDir, entry.Name())
-						if info, err := os.Stat(fullPath); err == nil {
-							actualFilePath = fullPath
-							fileSize = info.Size()
-							break
-						}
-					}
-				}
+			actualFilePath, fileSize = findCompletedFile(outDir, videoID, task.Type)
+
+			if actualFilePath != "" {
+				// The merge succeeded; any leftover fragments for this video are orphans.
+				a.cleanupOrphanFragments(outDir, videoID)
 			}
 		}
 
@@ -1922,22 +2023,25 @@ func (a *App) worker(task DownloadTask, taskID string) {
 			}
 		}
 
-		// Method 3: Find most recent mp4/m4a file (last resort)
+		// Method 3: Find most recent media file (last resort). Restricted to
+		// extensions matching the task type so a video task never claims a loose
+		// .m4a (and vice versa) when several downloads share a folder.
 		if actualFilePath == "" {
 			if entries, err := os.ReadDir(outDir); err == nil {
 				var mostRecentFile string
 				var mostRecentTime time.Time
 				for _, entry := range entries {
-					if !entry.IsDir() {
+					if !entry.IsDir() && isCandidateFile(entry.Name()) {
 						name := strings.ToLower(entry.Name())
 						// Only consider video/audio files, not temp files
 						if strings.HasSuffix(name, ".mp4") || strings.HasSuffix(name, ".m4a") ||
 							strings.HasSuffix(name, ".webm") || strings.HasSuffix(name, ".mkv") {
 							info, err := entry.Info()
 							if err == nil {
-								if info.ModTime().After(mostRecentTime) {
+								fullPath := filepath.Join(outDir, entry.Name())
+								if matchesTaskType(fullPath, task.Type) && info.ModTime().After(mostRecentTime) {
 									mostRecentTime = info.ModTime()
-									mostRecentFile = filepath.Join(outDir, entry.Name())
+									mostRecentFile = fullPath
 								}
 							}
 						}
