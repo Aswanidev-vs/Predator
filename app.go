@@ -446,6 +446,14 @@ func truncateError(err string, maxLen int) string {
 	return err[:maxLen] + "..."
 }
 
+// aria2cAvailable reports whether the optional aria2c parallel-download
+// accelerator binary is installed. Predator never bundles it, so callers
+// must fall back to yt-dlp's native downloader when this returns false.
+func aria2cAvailable() bool {
+	_, err := exec.LookPath("aria2c")
+	return err == nil
+}
+
 func extractResolution(resolution string) string {
 	matches := reExtractRes.FindStringSubmatch(resolution)
 	if len(matches) > 1 {
@@ -1807,6 +1815,10 @@ func (a *App) worker(task DownloadTask, taskID string) {
 		// Detect if this is a Twitter/X URL
 		isTwitter := strings.Contains(task.URL, "twitter.com") || strings.Contains(task.URL, "x.com")
 
+		// aria2c is an optional accelerator, not bundled by the app. When it's
+		// missing, yt-dlp's native downloader is used instead of failing.
+		useAria2c := aria2cAvailable()
+
 		// Create timeout context for download + merge operation
 		downloadCtx, downloadCancel := context.WithTimeout(ctx, downloadTimeout)
 		timedOut = false
@@ -1820,12 +1832,6 @@ func (a *App) worker(task DownloadTask, taskID string) {
 				format = buildVideoFormatString(task.CleanRes, true)
 			}
 
-			// Build referer arg if Twitter/X
-			refererArg := ""
-			if isTwitter {
-				refererArg = "--referer=https://x.com/"
-			}
-
 			mergerArgsList := buildMergerArgsList(task.AudioFormat)
 
 			// Try each merger args until one succeeds
@@ -1836,14 +1842,21 @@ func (a *App) worker(task DownloadTask, taskID string) {
 					NoCheckCertificates().
 					IgnoreErrors().
 					Impersonate("chrome").
-					Downloader("aria2c").
-					Downloader("m3u8:aria2c").
-					DownloaderArgs("aria2c:-x 16 -k 1M "+refererArg).
 					MergeOutputFormat("mp4").
 					AudioQuality("0").
 					PostProcessorArgs("Merger+ffmpeg:" + mergerArgs).
 					Output(filepath.Join(outDir, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
 					ProgressFunc(progressUpdateInterval, updateProgress)
+
+				if useAria2c {
+					aria2cArgs := "aria2c:-x 16 -k 1M"
+					if isTwitter {
+						aria2cArgs += " --referer=https://x.com/"
+					}
+					dl = dl.Downloader("aria2c").Downloader("m3u8:aria2c").DownloaderArgs(aria2cArgs)
+				} else if isTwitter {
+					dl = dl.Referer("https://x.com/")
+				}
 
 				_, err = dl.Run(downloadCtx, task.URL)
 
@@ -1872,22 +1885,24 @@ func (a *App) worker(task DownloadTask, taskID string) {
 			downloadCancel()
 		} else if task.Type == "Image" {
 			// Download images (or video thumbnails/media) from X/Twitter.
-			refererArg := ""
-			if isTwitter {
-				refererArg = "--referer=https://x.com/"
-			}
-
 			dl := ytdlp.New().
 				Format("best").
 				NoPlaylist().
 				NoCheckCertificates().
 				IgnoreErrors().
 				Impersonate("chrome").
-				Downloader("aria2c").
-				Downloader("m3u8:aria2c").
-				DownloaderArgs("aria2c:-x 16 -k 1M "+refererArg).
 				Output(filepath.Join(outDir, "%(title)s [%(id)s].%(ext)s")).
 				ProgressFunc(progressUpdateInterval, updateProgress)
+
+			if useAria2c {
+				aria2cArgs := "aria2c:-x 16 -k 1M"
+				if isTwitter {
+					aria2cArgs += " --referer=https://x.com/"
+				}
+				dl = dl.Downloader("aria2c").Downloader("m3u8:aria2c").DownloaderArgs(aria2cArgs)
+			} else if isTwitter {
+				dl = dl.Referer("https://x.com/")
+			}
 
 			_, err = dl.Run(downloadCtx, task.URL)
 			downloadCancel()
@@ -1901,11 +1916,6 @@ func (a *App) worker(task DownloadTask, taskID string) {
 				format = buildAudioFormatString(task.AudioFormat)
 			}
 
-			refererArg := ""
-			if isTwitter {
-				refererArg = "--referer=https://x.com/"
-			}
-
 			dl := ytdlp.New().
 				ExtractAudio().
 				AudioFormat(task.AudioFormat).
@@ -1914,12 +1924,19 @@ func (a *App) worker(task DownloadTask, taskID string) {
 				NoCheckCertificates().
 				IgnoreErrors().
 				Impersonate("chrome").
-				Downloader("aria2c").
-				Downloader("m3u8:aria2c").
-				DownloaderArgs("aria2c:-x 16 -k 1M "+refererArg).
 				Format(format).
 				Output(filepath.Join(outDir, "%(title)s [%(id)s].%(ext)s")).
 				ProgressFunc(progressUpdateInterval, updateProgress)
+
+			if useAria2c {
+				aria2cArgs := "aria2c:-x 16 -k 1M"
+				if isTwitter {
+					aria2cArgs += " --referer=https://x.com/"
+				}
+				dl = dl.Downloader("aria2c").Downloader("m3u8:aria2c").DownloaderArgs(aria2cArgs)
+			} else if isTwitter {
+				dl = dl.Referer("https://x.com/")
+			}
 
 			// For MP3 and WAV, we need to ensure proper conversion from webm/opus sources
 			// Add postprocessor args to force re-encoding to the target format
@@ -1966,18 +1983,19 @@ func (a *App) worker(task DownloadTask, taskID string) {
 			wailsRuntime.EventsEmit(a.ctx, "task-error", taskID, "Failed: download/merge timed out. Try lower resolution or check connection.")
 		} else {
 			errStr := err.Error()
-			if strings.Contains(errStr, "codec") ||
+			// Only a genuine ffmpeg postprocessing failure deserves the
+			// "merge" label. Everything else (missing external downloader,
+			// network error, extractor/403, disk full) is reported verbatim
+			// so the real cause is never hidden behind a misleading message.
+			isMergeError := strings.Contains(errStr, "Postprocessing:") ||
 				strings.Contains(errStr, "Merging formats into") ||
-				strings.Contains(errStr, "Postprocessing:") ||
-				strings.Contains(errStr, "ffmpeg") ||
-				strings.Contains(errStr, "postprocessor") ||
-				strings.Contains(errStr, "Could not write header") ||
-				strings.Contains(errStr, "Invalid data") ||
-				strings.Contains(errStr, "No such file") ||
-				strings.Contains(errStr, "exit status") {
-				wailsRuntime.EventsEmit(a.ctx, "task-error", taskID, "Failed: codec/merge error. Try lower resolution or different format.")
+				strings.Contains(errStr, "Could not write header")
+			if isMergeError {
+				wailsRuntime.EventsEmit(a.ctx, "task-error", taskID,
+					"Failed: video/audio merge failed — "+truncateError(errStr, 140))
 			} else {
-				wailsRuntime.EventsEmit(a.ctx, "task-error", taskID, truncateError(err.Error(), 80))
+				wailsRuntime.EventsEmit(a.ctx, "task-error", taskID,
+					"Download failed: "+truncateError(errStr, 140))
 			}
 		}
 	} else {
