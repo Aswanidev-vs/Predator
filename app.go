@@ -76,7 +76,8 @@ const (
 	// fallback re-encodes to H.264/AAC, which on long videos takes far more
 	// time than the download itself, so the old 5-minute cap killed merges
 	// mid-encode for anything bigger than a short clip.
-	downloadTimeout = 30 * time.Minute
+	downloadTimeout   = 30 * time.Minute
+	depInstallTimeout = 3 * time.Minute
 )
 
 /* -------------------- Types -------------------- */
@@ -230,8 +231,9 @@ func (a *App) FetchPlaylistInfo(url string) (*PlaylistInfo, error) {
 
 	// Use yt-dlp to get playlist info with flat playlist
 	// This outputs the playlist info as first JSON, then each video as separate JSON lines
-	result, err := ytdlp.New().
+	result, err := withJSRuntime(ytdlp.New()).
 		DumpJSON().
+		NoUpdate().
 		FlatPlaylist().
 		Run(ctx, url)
 	if err != nil {
@@ -446,12 +448,56 @@ func truncateError(err string, maxLen int) string {
 	return err[:maxLen] + "..."
 }
 
+// extractErrorDetail reduces yt-dlp's verbose failure output to the real cause.
+// yt-dlp prints routine WARNING blocks (stale-version notice, JS-runtime notice)
+// at the top of stderr and the actual "ERROR:" line at the bottom, so the last
+// ERROR line wins, then any "Postprocessing:" line, then the last non-empty
+// line. Without this, the warning text is all the user ever sees.
+func extractErrorDetail(errStr string) string {
+	lines := strings.Split(errStr, "\n")
+
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); strings.HasPrefix(line, "ERROR:") {
+			return line
+		}
+	}
+
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); strings.Contains(line, "Postprocessing:") {
+			return line
+		}
+	}
+
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+
+	return strings.TrimSpace(errStr)
+}
+
 // aria2cAvailable reports whether the optional aria2c parallel-download
 // accelerator binary is installed. Predator never bundles it, so callers
 // must fall back to yt-dlp's native downloader when this returns false.
 func aria2cAvailable() bool {
 	_, err := exec.LookPath("aria2c")
 	return err == nil
+}
+
+// withJSRuntime opts yt-dlp into an available JavaScript runtime. Modern
+// yt-dlp releases need one for YouTube extraction, but only enable deno by
+// default; node requires an explicit --js-runtimes flag. When neither is on
+// PATH, UpdateYtDlp installs bun into the go-ytdlp cache, which run()
+// auto-wires as --js-runtimes bun.
+func withJSRuntime(dl *ytdlp.Command) *ytdlp.Command {
+	if _, err := exec.LookPath("deno"); err == nil {
+		return dl // deno is yt-dlp's default runtime
+	}
+	if _, err := exec.LookPath("node"); err == nil {
+		return dl.JsRuntimes("node")
+	}
+	return dl
 }
 
 func extractResolution(resolution string) string {
@@ -1301,7 +1347,7 @@ func (a *App) CheckAndInstallDeps() error {
 	// If we have system tools, just update yt-dlp silently in background
 	if hasSystemTools {
 		go func() {
-			ytdlp.MustInstall(context.Background(), nil)
+			a.UpdateYtDlp()
 		}()
 		return nil
 	}
@@ -1369,7 +1415,10 @@ func (a *App) FetchVideoInfo(url string) (*VideoInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
 
-	result, err := ytdlp.New().DumpJSON().Run(ctx, url)
+	result, err := withJSRuntime(ytdlp.New()).
+		NoUpdate().
+		DumpJSON().
+		Run(ctx, url)
 	if err != nil {
 		return nil, err
 	}
@@ -1700,15 +1749,50 @@ func (a *App) cleanupOrphanFragments(outDir, videoID string) {
 	}
 }
 
-// UpdateYtDlp updates yt-dlp to the latest version
+// UpdateYtDlp updates yt-dlp to the latest version. ytdlp.Install only
+// guarantees the release pinned by the go-ytdlp library itself, so the
+// already-installed binary is additionally self-updated to the newest stable
+// release. Failures are non-fatal: downloads continue with whatever binary is
+// resolved, since yt-dlp's license mandates updates but an older binary can
+// still work for many sources.
 func (a *App) UpdateYtDlp() error {
 	var updateErr error
 	ytdlpOnce.Do(func() {
 		log.Println("Updating yt-dlp to latest version...")
-		_, err := ytdlp.Install(context.Background(), nil)
+		ctx, cancel := context.WithTimeout(context.Background(), depInstallTimeout)
+		defer cancel()
+
+		// AllowVersionMismatch: once yt-dlp self-updates past the release pinned
+		// by go-ytdlp, a strict version check would re-download the older pinned
+		// build on every launch. Resolve whatever is present, keep the newest.
+		installed, err := ytdlp.Install(ctx, &ytdlp.InstallOptions{AllowVersionMismatch: true})
 		if err != nil {
-			log.Printf("WARNING: yt-dlp update failed: %v", err)
+			log.Printf("WARNING: yt-dlp install failed: %v", err)
 			updateErr = err
+			return
+		}
+
+		// Self-update in place so the newest release is used even when the
+		// go-ytdlp library pins an older one.
+		updateCtx, updateCancel := context.WithTimeout(context.Background(), depInstallTimeout)
+		defer updateCancel()
+		if _, uerr := ytdlp.New().SetExecutable(installed.Executable).Update(updateCtx); uerr != nil {
+			log.Printf("WARNING: yt-dlp self-update failed (continuing with %s): %v", installed.Executable, uerr)
+			updateErr = uerr
+		}
+
+		// yt-dlp needs a JS runtime for YouTube extraction. deno is its default
+		// and node is enabled explicitly per command; when neither exists, fall
+		// back to bun, which go-ytdlp auto-wires into every command once the
+		// resolve cache is populated.
+		if _, err := exec.LookPath("deno"); err != nil {
+			if _, err := exec.LookPath("node"); err != nil {
+				bunCtx, bunCancel := context.WithTimeout(context.Background(), depInstallTimeout)
+				defer bunCancel()
+				if _, berr := ytdlp.InstallBun(bunCtx, nil); berr != nil {
+					log.Printf("WARNING: no JS runtime found and bun install failed: %v", berr)
+				}
+			}
 		}
 	})
 	return updateErr
@@ -1842,11 +1926,14 @@ func (a *App) worker(task DownloadTask, taskID string) {
 					NoCheckCertificates().
 					IgnoreErrors().
 					Impersonate("chrome").
+					NoUpdate().
 					MergeOutputFormat("mp4").
 					AudioQuality("0").
 					PostProcessorArgs("Merger+ffmpeg:" + mergerArgs).
 					Output(filepath.Join(outDir, "%(title)s [%(id)s] (%(resolution)s).%(ext)s")).
 					ProgressFunc(progressUpdateInterval, updateProgress)
+
+				dl = withJSRuntime(dl)
 
 				if useAria2c {
 					aria2cArgs := "aria2c:-x 16 -k 1M"
@@ -1885,12 +1972,13 @@ func (a *App) worker(task DownloadTask, taskID string) {
 			downloadCancel()
 		} else if task.Type == "Image" {
 			// Download images (or video thumbnails/media) from X/Twitter.
-			dl := ytdlp.New().
+			dl := withJSRuntime(ytdlp.New()).
 				Format("best").
 				NoPlaylist().
 				NoCheckCertificates().
 				IgnoreErrors().
 				Impersonate("chrome").
+				NoUpdate().
 				Output(filepath.Join(outDir, "%(title)s [%(id)s].%(ext)s")).
 				ProgressFunc(progressUpdateInterval, updateProgress)
 
@@ -1916,7 +2004,7 @@ func (a *App) worker(task DownloadTask, taskID string) {
 				format = buildAudioFormatString(task.AudioFormat)
 			}
 
-			dl := ytdlp.New().
+			dl := withJSRuntime(ytdlp.New()).
 				ExtractAudio().
 				AudioFormat(task.AudioFormat).
 				AudioQuality("0").
@@ -1924,6 +2012,7 @@ func (a *App) worker(task DownloadTask, taskID string) {
 				NoCheckCertificates().
 				IgnoreErrors().
 				Impersonate("chrome").
+				NoUpdate().
 				Format(format).
 				Output(filepath.Join(outDir, "%(title)s [%(id)s].%(ext)s")).
 				ProgressFunc(progressUpdateInterval, updateProgress)
@@ -1990,13 +2079,15 @@ func (a *App) worker(task DownloadTask, taskID string) {
 			isMergeError := strings.Contains(errStr, "Postprocessing:") ||
 				strings.Contains(errStr, "Merging formats into") ||
 				strings.Contains(errStr, "Could not write header")
+			detail := extractErrorDetail(errStr)
 			if isMergeError {
 				wailsRuntime.EventsEmit(a.ctx, "task-error", taskID,
-					"Failed: video/audio merge failed — "+truncateError(errStr, 140))
+					"Failed: video/audio merge failed — "+truncateError(detail, 160))
 			} else {
 				wailsRuntime.EventsEmit(a.ctx, "task-error", taskID,
-					"Download failed: "+truncateError(errStr, 140))
+					"Download failed: "+truncateError(detail, 160))
 			}
+			log.Printf("Task %s failed; full yt-dlp error: %v", taskID, err)
 		}
 	} else {
 		wailsRuntime.EventsEmit(a.ctx, "task-completed", taskID, task)

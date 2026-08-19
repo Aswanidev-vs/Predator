@@ -176,6 +176,38 @@ func TestFindCompletedFile_NoneExists(t *testing.T) {
 	assert.Equal(t, int64(0), size)
 }
 
+func TestExtractErrorDetail_StripsLeadingWarnings(t *testing.T) {
+	// Real-world shape of go-ytdlp's error string: routine warnings first,
+	// the actual ERROR line last. The user must see the cause, not the warning.
+	errStr := "exit code 1: exit status 1\n" +
+		"WARNING: Your yt-dlp version (2026.03.17) is older than 90 days!\n" +
+		"         It is strongly recommended to always use the latest version.\n" +
+		"[youtube] dQw4w9WgXcQ: Downloading webpage\n" +
+		"ERROR: [youtube] dQw4w9WgXcQ: Video unavailable\n"
+
+	assert.Equal(t, "ERROR: [youtube] dQw4w9WgXcQ: Video unavailable", extractErrorDetail(errStr))
+}
+
+func TestExtractErrorDetail_PrefersLastErrorLine(t *testing.T) {
+	errStr := "ERROR: first problem\n" +
+		"WARNING: unrelated noise\n" +
+		"ERROR: final merge failure\n"
+
+	assert.Equal(t, "ERROR: final merge failure", extractErrorDetail(errStr))
+}
+
+func TestExtractErrorDetail_PostprocessingWinsWithoutErrorLine(t *testing.T) {
+	errStr := "WARNING: stale version\n" +
+		"Postprocessing: ffmpeg exited with code 1\n"
+
+	assert.Equal(t, "Postprocessing: ffmpeg exited with code 1", extractErrorDetail(errStr))
+}
+
+func TestExtractErrorDetail_FallsBackToLastNonEmptyLine(t *testing.T) {
+	assert.Equal(t, "some raw failure", extractErrorDetail("noise\nsome raw failure\n"))
+	assert.Equal(t, "single line", extractErrorDetail("single line"))
+}
+
 func countOccurrences(haystack []string, needle string) int {
 	n := 0
 	for _, s := range haystack {
