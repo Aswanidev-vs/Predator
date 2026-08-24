@@ -102,7 +102,7 @@ wails build
 - **Container:** MP4 (with WebM option)
 - **Video codec:** H.264 (avc1) for maximum device compatibility
 - **Audio codec:** AAC (m4a) for best audio quality
-- **Codec transcoding:** All downloaded videos are transcoded to H.264+AAC via FFmpeg, ensuring audio and video always merge correctly regardless of source codec (VP9, AV1, Opus, etc.)
+- **Codec handling:** When the source is already H.264+AAC (the common case), video and audio are copied into MP4 without re-encoding for speed. If the source uses a codec that can't be muxed into MP4 (VP9, AV1, Opus, etc.), the app re-encodes to H.264+AAC so the merge always succeeds.
 - **Fallback handling:** If preferred codec isn't available, automatically falls back to next best option
 
 ### Audio Format
@@ -112,7 +112,7 @@ wails build
 - **Downloads:** User-selected folder or `PREDATOR_OUTPUT_DIR` environment variable
 - **History:** `~/.predator/history.json` (keeps last 100 items)
 - **Settings:** `~/.predator/settings.json`
-- **Dependencies:** `~/.cache/yt-dlp/` (yt-dlp, ffmpeg, ffprobe)
+- **Dependencies:** go-ytdlp's cache directory — `%LOCALAPPDATA%/go-ytdlp` on Windows (`~/Library/Caches/go-ytdlp` on macOS, `~/.cache/go-ytdlp` on Linux). yt-dlp and ffmpeg are installed there automatically.
 
 ### Performance
 - **Concurrent downloads:** Max 3 at a time to not overwhelm your connection
@@ -131,10 +131,11 @@ wails build
 
 ## Troubleshooting
 
-### "ffmpeg not found" error
-The app will prompt you to download ffmpeg on first run. If you skip it, you can:
-1. Install ffmpeg manually from [ffmpeg.org](https://ffmpeg.org)
-2. Or delete `~/.cache/yt-dlp/` and restart the app - it'll ask again
+### "ffmpeg not found" / video downloads with no audio
+Predator auto-locates ffmpeg (from your system `PATH` or its own bundled copy) and passes its location to yt-dlp, so video + audio merging works in almost all cases. If a download still ends up as a raw `.f137.mp4` fragment with no audio:
+1. Ensure ffmpeg is on your system `PATH`, or let the app install the bundled copy when it prompts. The app also auto-installs ffmpeg into its cache (`%LOCALAPPDATA%/go-ytdlp`) if none is found.
+2. If you declined the first-run install, restart the app to re-trigger it, or install ffmpeg manually from [ffmpeg.org](https://ffmpeg.org).
+3. The next download automatically recovers and merges any orphaned fragments left behind by a skipped merge — you usually don't need to re-download.
 
 ### Slow downloads
 - Check your internet connection
@@ -151,6 +152,12 @@ The app will prompt you to download ffmpeg on first run. If you skip it, you can
 - Try a different download location
 
 ## Changelog
+
+### Unreleased
+- **Fixed:** MP4 video downloaded but had no audio / was a raw `.f137.mp4` fragment with the task reported as "success". Root cause: yt-dlp couldn't find ffmpeg in the running process's `PATH`, and because `--ignore-errors` swallows that failure it silently skipped the merge and exited 0. The app now auto-locates ffmpeg (system `PATH` → go-ytdlp cache → auto-installed bundled copy) and passes it to yt-dlp via `--ffmpeg-location`, so the merge always runs.
+- **Added:** Merge-recovery safety net — after a "successful" video download, if no merged file exists, the orphaned video/audio fragments are merged directly with ffmpeg, so a fragment-only result is never reported as done.
+- **Fixed:** The dependency cache path was mismatched (`~/.cache/yt-dlp` vs go-ytdlp's real `%LOCALAPPDATA%/go-ytdlp`), which meant "Install Dependencies" placed ffmpeg where yt-dlp never looked. Bundled ffmpeg now lands in the correct cache.
+- **Fixed:** The title-based file lookup could pick a raw stream fragment as the delivered file; it now skips fragments.
 
 ### v1.3.0
 - **Fixed:** Audio not merging with video for certain YouTube videos. Old behavior used `--remux-video` which only remuxes the container without re-encoding, causing Opus audio to be silently copied into MP4 without conversion to AAC. Now uses `--recode-video` with explicit FFmpeg transcoding to ensure all downloads produce standard H.264+AAC MP4 files.
