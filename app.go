@@ -714,6 +714,132 @@ func buildMergerArgsList(audioFormat string) []string {
 	return append(args, "-c:v libx264 -crf 18 -c:a aac -b:a 192k")
 }
 
+// fileExists reports whether path exists (file or directory).
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// ytdlpCacheDir returns the directory go-ytdlp uses for its binaries and
+// prepends to the ffmpeg subprocess PATH. Bundled ffmpeg must land here to be
+// visible to yt-dlp; getYtdlpCacheDir() points at a different (legacy) path and
+// is only consulted as a fallback.
+func ytdlpCacheDir() string {
+	if dir, err := ytdlp.GetCacheDir(); err == nil {
+		return dir
+	}
+	return getYtdlpCacheDir()
+}
+
+// resolveFFmpegDir returns a directory containing ffmpeg that yt-dlp can use via
+// --ffmpeg-location. It checks the process PATH first, then any bundled ffmpeg
+// already in go-ytdlp's cache, and finally downloads the bundled build if
+// nothing is found. Returning "" means ffmpeg is unavailable.
+func (a *App) resolveFFmpegDir() string {
+	if p, err := exec.LookPath("ffmpeg"); err == nil {
+		return filepath.Dir(p)
+	}
+	for _, dir := range []string{ytdlpCacheDir(), getYtdlpCacheDir()} {
+		for _, name := range []string{"ffmpeg.exe", "ffmpeg"} {
+			if fileExists(filepath.Join(dir, name)) {
+				return dir
+			}
+		}
+	}
+	if a.ensureBundledFFmpeg() == nil {
+		if dir := ytdlpCacheDir(); fileExists(filepath.Join(dir, "ffmpeg.exe")) {
+			return dir
+		}
+	}
+	return ""
+}
+
+// ensureBundledFFmpeg downloads the yt-dlp FFmpeg-Builds bundle and extracts
+// ffmpeg/ffprobe into go-ytdlp's cache. go-ytdlp prepends that directory to the
+// ffmpeg subprocess PATH, so yt-dlp finds the binary even when no system ffmpeg
+// exists on the launching environment's PATH.
+func (a *App) ensureBundledFFmpeg() error {
+	cacheDir := ytdlpCacheDir()
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return err
+	}
+	url := fmt.Sprintf("https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-%s-%s.zip",
+		getFFmpegOS(), getFFmpegArch())
+	tempDir := filepath.Join(cacheDir, "temp")
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return err
+	}
+	zipPath := filepath.Join(tempDir, "ffmpeg.zip")
+	defer os.Remove(zipPath)
+	if err := a.downloadFileWithProgress(url, zipPath, 0, 100); err != nil {
+		return err
+	}
+	return a.extractFFmpeg(zipPath, cacheDir)
+}
+
+// recoverMergedFile merges leftover video/audio stream fragments for videoID
+// into the MP4 yt-dlp should have produced, using the same codec ladder as the
+// in-process merge. This rescues downloads where yt-dlp reported success but
+// skipped the merge (e.g. ffmpeg missing, swallowed by --ignore-errors).
+// Returns the produced file path, or "" if no fragments were available to merge.
+func (a *App) recoverMergedFile(outDir, videoID string, task DownloadTask) (string, error) {
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		return "", err
+	}
+	var videoFrag, audioFrag string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.Contains(name, videoID) {
+			continue
+		}
+		lower := strings.ToLower(name)
+		if reStreamFragment.MatchString(lower) {
+			switch {
+			case strings.HasSuffix(lower, ".mp4"):
+				videoFrag = filepath.Join(outDir, name)
+			case strings.HasSuffix(lower, ".m4a") || strings.HasSuffix(lower, ".webm") ||
+				strings.HasSuffix(lower, ".opus") || strings.HasSuffix(lower, ".ogg"):
+				audioFrag = filepath.Join(outDir, name)
+			}
+		}
+	}
+	if videoFrag == "" || audioFrag == "" {
+		return "", fmt.Errorf("no orphaned video/audio fragments to merge for %s", videoID)
+	}
+
+	ffmpegDir := a.resolveFFmpegDir()
+	if ffmpegDir == "" {
+		return "", fmt.Errorf("ffmpeg not available for merge recovery")
+	}
+	ffmpegPath := filepath.Join(ffmpegDir, "ffmpeg.exe")
+	if !fileExists(ffmpegPath) {
+		ffmpegPath = filepath.Join(ffmpegDir, "ffmpeg")
+	}
+
+	// Reconstruct the output name yt-dlp would have used (strip the .fNNN.ext suffix).
+	base := reStreamFragment.ReplaceAllString(filepath.Base(videoFrag), "")
+	if base == "" {
+		base = fmt.Sprintf("%s_recovered", videoID)
+	}
+	outPath := filepath.Join(outDir, base+".mp4")
+
+	for _, step := range buildMergerArgsList(task.AudioFormat) {
+		args := []string{"-y", "-i", videoFrag, "-i", audioFrag}
+		args = append(args, strings.Fields(step)...)
+		args = append(args, "-movflags", "+faststart", outPath)
+		cmd := exec.Command(ffmpegPath, args...)
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+		if cmd.Run() == nil {
+			if info, stErr := os.Stat(outPath); stErr == nil && info.Size() > 0 {
+				return outPath, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("ffmpeg merge recovery failed for %s", videoID)
+}
+
 // isCandidateFile reports whether name looks like a final yt-dlp output rather
 // than an intermediate. Part/ytdl/temp files and unmerged stream fragments
 // ("Title [id] (1080p).f137.mp4") are excluded.
@@ -1935,6 +2061,10 @@ func (a *App) worker(task DownloadTask, taskID string) {
 
 				dl = withJSRuntime(dl)
 
+				if ffmpegDir := a.resolveFFmpegDir(); ffmpegDir != "" {
+					dl = dl.FFmpegLocation(ffmpegDir)
+				}
+
 				if useAria2c {
 					aria2cArgs := "aria2c:-x 16 -k 1M"
 					if isTwitter {
@@ -2004,6 +2134,7 @@ func (a *App) worker(task DownloadTask, taskID string) {
 				format = buildAudioFormatString(task.AudioFormat)
 			}
 
+			ffmpegDir := a.resolveFFmpegDir()
 			dl := withJSRuntime(ytdlp.New()).
 				ExtractAudio().
 				AudioFormat(task.AudioFormat).
@@ -2016,6 +2147,10 @@ func (a *App) worker(task DownloadTask, taskID string) {
 				Format(format).
 				Output(filepath.Join(outDir, "%(title)s [%(id)s].%(ext)s")).
 				ProgressFunc(progressUpdateInterval, updateProgress)
+
+			if ffmpegDir != "" {
+				dl = dl.FFmpegLocation(ffmpegDir)
+			}
 
 			if useAria2c {
 				aria2cArgs := "aria2c:-x 16 -k 1M"
@@ -2100,6 +2235,19 @@ func (a *App) worker(task DownloadTask, taskID string) {
 
 		videoID := extractVideoID(task.URL)
 
+		// Safety net: yt-dlp may exit 0 while silently skipping the merge (ffmpeg
+		// unavailable, swallowed by --ignore-errors), leaving raw .fNNN fragments.
+		// If no merged file resulted, merge the orphaned fragments ourselves.
+		if task.Type == "Video" && videoID != "" {
+			if _, existing := findCompletedFile(outDir, videoID, task.Type); existing == 0 {
+				if recovered, rerr := a.recoverMergedFile(outDir, videoID, task); rerr != nil {
+					log.Printf("Merge recovery failed for %s: %v", videoID, rerr)
+				} else if recovered != "" {
+					log.Printf("Recovered merged file via ffmpeg: %s", recovered)
+				}
+			}
+		}
+
 		// Method 1: Find file by video ID (most reliable - avoids title matching issues)
 		if videoID != "" {
 			actualFilePath, fileSize = findCompletedFile(outDir, videoID, task.Type)
@@ -2118,6 +2266,9 @@ func (a *App) worker(task DownloadTask, taskID string) {
 				var largestFile string
 				var largestSize int64
 				for _, f := range files {
+					if !isCandidateFile(filepath.Base(f)) {
+						continue
+					}
 					if info, err := os.Stat(f); err == nil && !info.IsDir() {
 						if info.Size() > largestSize {
 							largestSize = info.Size()
