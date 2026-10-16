@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/lrstanley/go-ytdlp v1.3.6
 	github.com/stretchr/testify v1.12.0
-	github.com/wailsapp/wails/v2 v2.12.0
+	github.com/wailsapp/wails/v2 v2.16.0
 	go.uber.org/goleak v1.3.0
 )
 

@@ -2034,13 +2034,11 @@ func (a *App) worker(task DownloadTask, taskID string) {
 		timedOut = false
 
 		if task.Type == "Video" {
-			var format string
-			if isM3U8 {
-				// For m3u8/HLS streams, use bestvideo with remuxing to mp4
-				format = "bestvideo[ext=mp4]/bestvideo[ext=m4a]/bestvideo[ext=webm]/bestvideo/best"
-			} else {
-				format = buildVideoFormatString(task.CleanRes, true)
-			}
+			// HLS sources (Reddit's v.redd.it, for one) publish video and audio as
+			// separate renditions, so the video selector must request bestaudio too
+			// or the merged output comes out silent. buildVideoFormatString pairs
+			// them and falls back to a combined `best` for muxed streams.
+			format := buildVideoFormatString(task.CleanRes, true)
 
 			mergerArgsList := buildMergerArgsList(task.AudioFormat)
 
