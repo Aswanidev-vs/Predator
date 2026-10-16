@@ -115,6 +115,42 @@ func TestBuildVideoFormatString(t *testing.T) {
 	}
 }
 
+// Regression guard for the silent-video bug: HLS sources such as Reddit's
+// v.redd.it publish video and audio as separate renditions, so a selector of
+// bare "bestvideo" yields a merged file with no audio stream at all. Every
+// bestvideo entry must pair with bestaudio.
+func TestBuildVideoFormatString_AlwaysPairsVideoWithAudio(t *testing.T) {
+	for _, res := range []string{"best", "1080", "720", "480", "360", "240", "1440"} {
+		t.Run(res, func(t *testing.T) {
+			got := buildVideoFormatString(res, true)
+
+			var paired bool
+			for _, entry := range strings.Split(got, "/") {
+				if strings.HasPrefix(entry, "bestvideo") {
+					assert.Contains(t, entry, "+bestaudio",
+						"entry %q selects video without audio, producing a silent file", entry)
+					paired = true
+				}
+			}
+			assert.True(t, paired, "expected at least one bestvideo entry")
+
+			// The trailing combined format keeps muxed single-rendition HLS working.
+			last := strings.Split(got, "/")[len(strings.Split(got, "/"))-1]
+			assert.True(t, strings.HasPrefix(last, "best"),
+				"must end in a combined `best` fallback for muxed streams, got %q", last)
+		})
+	}
+}
+
+// A numeric resolution must reach the format selector, otherwise every HLS
+// download ignores the user's choice and silently fetches the highest quality.
+func TestBuildVideoFormatString_HonorsResolution(t *testing.T) {
+	got := buildVideoFormatString("720", true)
+	assert.Contains(t, got, "[height=720]")
+	assert.Contains(t, got, "[height<=720]")
+	assert.NotContains(t, got, "[height<=1080]", "must not widen past the requested resolution")
+}
+
 func TestBuildWebmFormatString(t *testing.T) {
 	got := buildWebmFormatString("1080")
 	assert.Contains(t, got, "av01", "webm should prefer AV1")
